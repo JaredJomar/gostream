@@ -65,8 +65,12 @@ class GoStormSync:
         self.NEGATIVE_CACHE_FILE = os.path.join(self.STATE_DIR, "no_mkv_hashes.json")
         self.MOVIE_IMDB_CACHE_FILE = os.path.join(self.STATE_DIR, "movie_imdb_cache.json")
         self.MOVIE_NO_STREAMS_CACHE_FILE = os.path.join(self.STATE_DIR, "movie_no_streams_cache.json")
+        self.MOVIE_RECHECK_CACHE_FILE = os.path.join(self.STATE_DIR, "movie_recheck_cache.json")
+        self.MOVIE_ADD_FAIL_CACHE_FILE = os.path.join(self.STATE_DIR, "movie_add_fail_cache.json")
         self.NEGATIVE_CACHE_TTL_HOURS = 12  # configurabile
         self.MOVIE_NO_STREAMS_CACHE_TTL_HOURS = int(os.getenv("MOVIE_NO_STREAMS_CACHE_TTL_HOURS", "24"))
+        self.MOVIE_RECHECK_CACHE_TTL_HOURS = int(os.getenv("MOVIE_RECHECK_CACHE_TTL_HOURS", "720"))
+        self.MOVIE_ADD_FAIL_CACHE_TTL_HOURS = int(os.getenv("MOVIE_ADD_FAIL_CACHE_TTL_HOURS", "168"))
         try:
             os.makedirs(self.STATE_DIR, exist_ok=True)
         except OSError:
@@ -76,6 +80,8 @@ class GoStormSync:
         self._negative_cache = self._load_negative_cache()
         self._movie_imdb_cache = self._load_movie_imdb_cache()
         self._movie_no_streams_cache = self._load_movie_no_streams_cache()
+        self._movie_recheck_cache = self._load_movie_recheck_cache()
+        self._movie_add_fail_cache = self._load_movie_add_fail_cache()
         self.BLACKLIST_FILE = os.path.join(self.STATE_DIR, "blacklist.json")
         self._blacklist = self._load_blacklist()
         
@@ -96,6 +102,8 @@ class GoStormSync:
         except Exception:
             pass
         self._prune_movie_no_streams_cache()
+        self._prune_movie_recheck_cache()
+        self._prune_movie_add_fail_cache()
         self.LOG_FILE = os.path.join(_cfg.get('_log_dir', '/home/pi/logs'), 'gostorm-debug.log')
         # TMDB / Torrentio
         self.TMDB_API_KEY = _cfg.get('tmdb_api_key', '')
@@ -1366,6 +1374,126 @@ class GoStormSync:
         if imdb_id in self._movie_no_streams_cache:
             self._movie_no_streams_cache.pop(imdb_id, None)
             self._save_movie_no_streams_cache()
+
+    def _load_movie_recheck_cache(self) -> dict:
+        """Load cache of movies recently checked and considered stable."""
+        try:
+            if os.path.isfile(self.MOVIE_RECHECK_CACHE_FILE):
+                with open(self.MOVIE_RECHECK_CACHE_FILE, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_movie_recheck_cache(self):
+        """Persist movie recheck cache to disk (atomic)."""
+        try:
+            tmp = self.MOVIE_RECHECK_CACHE_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(self._movie_recheck_cache, f)
+            os.replace(tmp, self.MOVIE_RECHECK_CACHE_FILE)
+        except Exception as e:
+            self.log("WARN", f"Unable to save movie recheck cache: {e}")
+
+    def _prune_movie_recheck_cache(self):
+        """Drop expired recheck cache entries by TTL."""
+        now = int(time.time())
+        ttl = self.MOVIE_RECHECK_CACHE_TTL_HOURS * 3600
+        changed = False
+        for imdb_id, rec in list(self._movie_recheck_cache.items()):
+            ts = rec.get('ts') if isinstance(rec, dict) else None
+            if not ts or (now - ts) > ttl:
+                self._movie_recheck_cache.pop(imdb_id, None)
+                changed = True
+        if changed:
+            self._save_movie_recheck_cache()
+
+    def _is_movie_recheck_cached(self, imdb_id: str) -> bool:
+        """Check if this movie should be skipped due to long recheck interval."""
+        rec = self._movie_recheck_cache.get(imdb_id, {})
+        if not isinstance(rec, dict):
+            return False
+        ts = rec.get('ts')
+        if not ts:
+            return False
+        age = int(time.time()) - int(ts)
+        return age <= (self.MOVIE_RECHECK_CACHE_TTL_HOURS * 3600)
+
+    def _mark_movie_recheck(self, imdb_id: str, title: str, reason: str):
+        """Mark movie as checked/stable so it can be skipped until TTL expires."""
+        if not imdb_id:
+            return
+        self._movie_recheck_cache[imdb_id] = {
+            'title': title or "",
+            'reason': reason,
+            'ts': int(time.time()),
+        }
+        self._save_movie_recheck_cache()
+
+    def _load_movie_add_fail_cache(self) -> dict:
+        """Load cooldown cache for repeated add_torrent failures."""
+        try:
+            if os.path.isfile(self.MOVIE_ADD_FAIL_CACHE_FILE):
+                with open(self.MOVIE_ADD_FAIL_CACHE_FILE, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_movie_add_fail_cache(self):
+        """Persist add-failure cooldown cache to disk (atomic)."""
+        try:
+            tmp = self.MOVIE_ADD_FAIL_CACHE_FILE + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(self._movie_add_fail_cache, f)
+            os.replace(tmp, self.MOVIE_ADD_FAIL_CACHE_FILE)
+        except Exception as e:
+            self.log("WARN", f"Unable to save movie add-fail cache: {e}")
+
+    def _prune_movie_add_fail_cache(self):
+        """Drop expired add-failure cache entries by TTL."""
+        now = int(time.time())
+        ttl = self.MOVIE_ADD_FAIL_CACHE_TTL_HOURS * 3600
+        changed = False
+        for imdb_id, rec in list(self._movie_add_fail_cache.items()):
+            ts = rec.get('ts') if isinstance(rec, dict) else None
+            if not ts or (now - ts) > ttl:
+                self._movie_add_fail_cache.pop(imdb_id, None)
+                changed = True
+        if changed:
+            self._save_movie_add_fail_cache()
+
+    def _is_movie_add_fail_cached(self, imdb_id: str) -> bool:
+        """Check if movie is currently in add-failure cooldown."""
+        rec = self._movie_add_fail_cache.get(imdb_id, {})
+        if not isinstance(rec, dict):
+            return False
+        ts = rec.get('ts')
+        if not ts:
+            return False
+        age = int(time.time()) - int(ts)
+        return age <= (self.MOVIE_ADD_FAIL_CACHE_TTL_HOURS * 3600)
+
+    def _mark_movie_add_fail(self, imdb_id: str, title: str, reason: str):
+        """Mark movie as failed to add so retries are cooled down."""
+        if not imdb_id:
+            return
+        self._movie_add_fail_cache[imdb_id] = {
+            'title': title or "",
+            'reason': reason,
+            'ts': int(time.time()),
+        }
+        self._save_movie_add_fail_cache()
+
+    def _clear_movie_add_fail(self, imdb_id: str):
+        """Clear add-failure cooldown after a successful add."""
+        if imdb_id in self._movie_add_fail_cache:
+            self._movie_add_fail_cache.pop(imdb_id, None)
+            self._save_movie_add_fail_cache()
 
     def _load_blacklist(self) -> dict:
         """Load blacklist from disk."""
@@ -3322,6 +3450,14 @@ class GoStormSync:
             if self._is_movie_no_stream_cached(imdb_id):
                 self.log("DEBUG", f"Skip movie (recent no-stream cache): {title} ({imdb_id})")
                 continue
+            # Skip movies recently checked and already considered stable
+            if self._is_movie_recheck_cached(imdb_id):
+                self.log("DEBUG", f"Skip movie (recheck cache): {title} ({imdb_id})")
+                continue
+            # Skip movies in cooldown after repeated add-torrent failures
+            if self._is_movie_add_fail_cached(imdb_id):
+                self.log("DEBUG", f"Skip movie (add-fail cooldown): {title} ({imdb_id})")
+                continue
             
             self.log("INFO", f"Processing movie: {title} ({imdb_id})")
             
@@ -3425,6 +3561,7 @@ class GoStormSync:
             
             if not best_stream:
                 self.log("INFO", f"Skip movie (no better streams available): {title}")
+                self._mark_movie_recheck(imdb_id, title, "no_better_stream")
                 continue
             
             # Use the best stream found
@@ -3464,6 +3601,7 @@ class GoStormSync:
                     old_existing_path = candidate_existing
                 else:
                     self.log("INFO", f"Skip movie (versione adeguata già presente): {os.path.basename(candidate_existing)}")
+                    self._mark_movie_recheck(imdb_id, title, "existing_adequate")
                     continue
             
             # SYNC: Clear negative cache before attempting upgrade/add (prevents stale negative entries)
@@ -3477,7 +3615,10 @@ class GoStormSync:
             
             if not stat_string or not hash_value:
                 self.log("ERROR", f"Failed to add torrent for movie: {title}")
+                self._mark_movie_add_fail(imdb_id, title, "add_torrent_failed")
                 continue
+            else:
+                self._clear_movie_add_fail(imdb_id)
             
             if stat_string in ["Torrent added", "Torrent working", "Torrent getting info"]:
                 self.log_success(f"Successfully added torrent: {title} (hash: {hash_value[:8]}...)")
@@ -3630,6 +3771,7 @@ class GoStormSync:
                     self.remove_movie_duplicates_by_hash(self.MOVIES_DIR)
                 else:
                     self.log("INFO", f"UPGRADE: No cleanup needed - no files created for: {title}")
+                self._mark_movie_recheck(imdb_id, title, "processed")
             
             # Add processing pause like bash version
             time.sleep(self.PROCESS_INTERVAL)
