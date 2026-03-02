@@ -69,7 +69,7 @@ class GoStormSync:
         self.MOVIE_ADD_FAIL_CACHE_FILE = os.path.join(self.STATE_DIR, "movie_add_fail_cache.json")
         self.NEGATIVE_CACHE_TTL_HOURS = 12  # configurabile
         self.MOVIE_NO_STREAMS_CACHE_TTL_HOURS = int(os.getenv("MOVIE_NO_STREAMS_CACHE_TTL_HOURS", "24"))
-        self.MOVIE_RECHECK_CACHE_TTL_HOURS = int(os.getenv("MOVIE_RECHECK_CACHE_TTL_HOURS", "720"))
+        self.MOVIE_RECHECK_CACHE_TTL_HOURS = int(os.getenv("MOVIE_RECHECK_CACHE_TTL_HOURS", "48"))
         self.MOVIE_ADD_FAIL_CACHE_TTL_HOURS = int(os.getenv("MOVIE_ADD_FAIL_CACHE_TTL_HOURS", "168"))
         try:
             os.makedirs(self.STATE_DIR, exist_ok=True)
