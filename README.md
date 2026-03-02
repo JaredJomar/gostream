@@ -39,6 +39,47 @@ This is not a torrent client with a media server bolted on. The FUSE filesystem 
 
 ---
 
+## The Setup: GoStream + Plex + Infuse on Apple TV
+
+> Not a developer? This section explains what you actually get and why it works so well.
+
+**The end result**: you open Infuse on your Apple TV, your entire movie library appears with posters and metadata, you press Play on a 4K Dolby Vision film and it starts in under a second. No buffering. No "downloading...". No subscription to Real-Debrid or any external service. Everything runs on a Raspberry Pi in your home.
+
+### How the three pieces fit together
+
+**GoStream** runs on the Raspberry Pi. It creates a virtual hard drive that looks completely real to the rest of your network: it contains thousands of `.mkv` files, each the correct size, each seekable. In reality, none of those files exist on disk. When anything reads a byte, GoStream silently fetches it in real-time from the BitTorrent network and passes it through.
+
+**Plex** sees this virtual hard drive as a normal media library. It scans the files, downloads posters and descriptions from the internet, tracks what you've watched, and makes everything available on your home network, just like it would with a real NAS.
+
+**Infuse** on Apple TV connects to your Plex library and plays the files using Direct Play: it reads the video stream directly from the file, with no conversion or re-encoding. This is why it handles 4K HDR Dolby Vision effortlessly, even though it is coming from a torrent in real time.
+
+### Why this beats Stremio
+
+Stremio routes your playback through external services (Real-Debrid, Torrentio): your data leaves your home, you depend on third-party availability, and you pay a subscription. GoStream is 100% local. There is no external dependency at playback time, no monthly fee, and your library never disappears because a service went down.
+
+### Why Infuse starts in under a second
+
+When you press Play, Infuse immediately reads the beginning and end of the file to load the video index and seek tables. On a real hard drive this is instant. GoStream replicates this with an **SSD warmup cache**: the first 64 MB and last few MB of every file are pre-cached on the Pi's SSD during the initial Plex library scan. By the time you press Play, those bytes are already on disk and Infuse gets them in milliseconds.
+
+On Stremio, the same probing of the file start and end would force the torrent to find peers and download those specific positions first, often causing a 5-15 second delay.
+
+### Why your library survives a reboot
+
+Every file on a real filesystem has a permanent ID called an **inode**. Plex and Infuse use these IDs to recognize files across restarts, so they know "this is the same film I scanned last week" and do not re-download metadata or reset your watch history.
+
+On a standard virtual filesystem, these IDs are random and change every time the system restarts. GoStream solves this by saving a persistent inode map (`inode_map.json`) to disk. After a reboot, every virtual `.mkv` gets back the exact same ID it had before. To Plex and Infuse, it is indistinguishable from a file that never moved.
+
+### When you press Play: the full chain
+
+1. You press Play on Infuse (Apple TV) -> Infuse requests the file from Plex
+2. Plex reads the file from GoStream's virtual filesystem
+3. Plex sends a webhook to GoStream: "user started playing *this* film"
+4. GoStream identifies the torrent from the IMDB ID and switches to **Priority Mode**: all bandwidth focuses on the film you are watching, background activity is paused
+5. Bytes flow: BitTorrent peers -> GoStream RAM -> Plex -> Infuse -> your TV
+6. If you seek, GoStream jumps directly to that position in the torrent with no re-buffering from the start
+
+---
+
 ## Screenshots
 
 ![Health Monitor — Status grid and sync controls](docs/screenshots/health_monitor_1.png)
