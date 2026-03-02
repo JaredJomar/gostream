@@ -207,6 +207,7 @@ class GoStormSync:
         self.TV_CORE_INDEX_FILE = os.path.join(self.STATE_DIR, "tv_core_index.json")
         self._movie_core_index = self._load_core_index(self.MOVIE_CORE_INDEX_FILE)
         self._tv_core_index = self._load_core_index(self.TV_CORE_INDEX_FILE)
+        self._movie_details_cache = {}
         # Rebuild se file mancante / vuoto
         if not self._movie_core_index:
             self._rebuild_movie_core_index()
@@ -1976,6 +1977,41 @@ class GoStormSync:
                 return cand
         return ""
 
+    def _fetch_movie_details(self, tmdb_id: int) -> Optional[Dict]:
+        """Fetch full movie details from TMDB, including watch providers (cached per run)."""
+        if not tmdb_id:
+            return None
+        if tmdb_id in self._movie_details_cache:
+            return self._movie_details_cache[tmdb_id]
+
+        response = self.safe_curl(
+            f"{self.TMDB_BASE_URL}/movie/{tmdb_id}",
+            params={'api_key': self.TMDB_API_KEY, 'append_to_response': 'watch/providers'}
+        )
+        if response:
+            try:
+                details = response.json()
+                self._movie_details_cache[tmdb_id] = details
+                return details
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        self._movie_details_cache[tmdb_id] = None
+        return None
+
+    def _is_movie_on_premium_streaming_it(self, details: Optional[Dict]) -> bool:
+        """Check if movie is available on premium services in Italy (flatrate)."""
+        if not details:
+            return False
+        try:
+            providers = details.get('watch/providers', {}).get('results', {}).get('IT', {}).get('flatrate', [])
+            for provider in providers:
+                if provider.get('provider_id') in self.PREMIUM_PROVIDER_IDS:
+                    self.log("DEBUG", f"Premium IT Provider match: {provider.get('provider_name')} for {details.get('title')}")
+                    return True
+        except Exception:
+            pass
+        return False
+
     def get_tmdb_latest_movies(self) -> List[Dict]:
         """
         Exact replica of bash get_tmdb_latest_movies() function
@@ -2165,6 +2201,8 @@ class GoStormSync:
         # Filter for last 6 months, deduplicate and sort by release date
         filtered_results = []
         seen_ids = set()
+        skipped_non_premium_international = 0
+        bypassed_non_en_it_via_premium = 0
 
         for movie in all_results:
             movie_id = movie.get('id')
@@ -2177,16 +2215,22 @@ class GoStormSync:
             if not release_date or release_date < six_months_ago:
                 continue
 
-            # Filter by language
+            # Filter by language.
+            # EN/IT are always accepted. Other languages need Italian premium streaming availability.
             original_language = movie.get('original_language', '')
             if original_language not in ['en', 'it']:
-                continue
+                details = self._fetch_movie_details(movie_id)
+                if not self._is_movie_on_premium_streaming_it(details):
+                    skipped_non_premium_international += 1
+                    continue
+                bypassed_non_en_it_via_premium += 1
 
             filtered_results.append(movie)
         
         # Sort by release date (newest first)
         filtered_results.sort(key=lambda x: x.get('release_date', '1900-01-01'), reverse=True)
         
+        self.log("INFO", f"Movie discovery: kept={len(filtered_results)}, bypass_non_en_it_premium={bypassed_non_en_it_via_premium}, skipped_non_premium_international={skipped_non_premium_international}")
         return filtered_results
 
     def get_tmdb_latest_tv(self) -> List[Dict]:
@@ -3771,7 +3815,10 @@ class GoStormSync:
                     self.remove_movie_duplicates_by_hash(self.MOVIES_DIR)
                 else:
                     self.log("INFO", f"UPGRADE: No cleanup needed - no files created for: {title}")
-                self._mark_movie_recheck(imdb_id, title, "processed")
+                if last_created_mkv and os.path.isfile(last_created_mkv):
+                    self._mark_movie_recheck(imdb_id, title, "processed")
+                else:
+                    self.log("DEBUG", f"Skip recheck mark (no virtual file created yet): {title} ({imdb_id})")
             
             # Add processing pause like bash version
             time.sleep(self.PROCESS_INTERVAL)
