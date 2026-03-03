@@ -1,6 +1,6 @@
-# AI Stream Pilot for GoStream (Unified Engine)
+# AI Pilot for GoStream (Unified Engine)
 
-**AI Stream Pilot** is an embedded neural optimization engine for the Raspberry Pi 4. It uses a quantized LLM (Qwen2.5-0.5B via llama.cpp) to autonomously tune BitTorrent parameters in real-time, balancing download speed with CPU thermal limits.
+**AI Pilot** is an embedded neural optimization engine for the Raspberry Pi 4. It uses a quantized LLM (Qwen2.5-0.5B via llama.cpp) to autonomously tune BitTorrent parameters in real-time, balancing download speed with CPU thermal limits.
 
 ## Architecture
 
@@ -10,7 +10,8 @@ The system consists of two main components running on the Raspberry Pi:
     *   **Engine**: `llama.cpp` server mode.
     *   **Model**: `qwen2.5-0.5b-instruct-q4_k_m.gguf` (Quantized for ARM).
     *   **Port**: `8085` (Internal).
-    *   **Resources**: Limited to 2 threads, 256 context size, 500MB RAM.
+    *   **RAM Usage**: ~550MB (Actual) / 800MB (Hard limit set in service).
+    *   **Resources**: Limited to 2 threads, 256 context size.
     *   **Priority**: `Nice=15` (Low priority) to never interrupt video playback.
 
 2.  **AI Tuner (`gostream/ai`)**:
