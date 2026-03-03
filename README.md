@@ -77,7 +77,6 @@ GoStream has no external dependency at playback time. No third-party service, no
 
 When you press Play, Infuse immediately reads the beginning and end of the file to load the video index and seek tables. On a real hard drive this is instant. GoStream replicates this with an **SSD warmup cache**: the first 64 MB and last few MB of every file are pre-cached on the Pi's SSD during the initial Plex library scan. By the time you press Play, those bytes are already on disk and Infuse gets them in milliseconds.
 
-On Stremio, the same probing of the file start and end would force the torrent to find peers and download those specific positions first, often causing a 5-15 second delay.
 
 ### Why your library survives a reboot
 
