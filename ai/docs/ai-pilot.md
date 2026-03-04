@@ -26,9 +26,10 @@ The AI acts as a "Pilot" observing trends through a moving average window:
 
 ## Real-Time Adjustments
 
-*   **Connections Limit**: Scaled between **15 and 60** peers. The AI prioritizes safety (15 conns) when CPU > 75% or speed is high, and explores higher limits (35-60) only when peers are scarce and CPU is low.
-*   **Peer Timeout**: Adjusted between **15s and 60s**. Lower values are used to cycle through bad peers faster on slow torrents.
+*   **Connections Limit**: Scaled between **15 and 60** peers. The AI prioritizes safety when CPU > 75% or speed is high, and explores higher limits only when peers are scarce and CPU is low.
+*   **Peer Timeout**: Lower values are used to cycle through bad peers faster on slow torrents.
 *   **Hysteresis & Pulse**: To keep logs clean, changes are only logged when parameters actually change. A **Pulse log** is emitted every 5 minutes during stable periods to confirm the optimizer is still active.
+*   **More to come**
 
 ## Installation & Setup
 
