@@ -1,6 +1,6 @@
-# AI Pilot Overview [Experimental]
+# AI GoStream Pilot Overview [Experimental]
 
-**AI Pilot** is an **optional** autonomous optimization engine designed for GoStream on Raspberry Pi 4. It leverages a tiny local LLM (Qwen2.5-0.5B) to dynamically tune BitTorrent parameters, achieving two critical goals:
+**AI GoStream Pilot** is an **optional** autonomous optimization engine designed for GoStream on Raspberry Pi 4. It leverages a tiny local LLM (Qwen2.5-0.5B) to dynamically tune BitTorrent parameters, achieving two critical goals:
 
 ## Optional Activation
 The system is designed to be plug-and-play and entirely decoupled:
