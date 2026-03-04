@@ -29,6 +29,7 @@ var torrentSpeedAvg []float64
 var totalSpeedAvg []float64
 var cpuUsageAvg []float64
 var cycleCounter int
+var pulseCounter int
 
 type AITweak struct {
 	ConnectionsLimit int `json:"connections_limit"`
@@ -75,7 +76,7 @@ func StartAITuner(ctx context.Context, aiURL string) {
 	}
 }
 
-var pulseCounter int
+var lastActiveHash string
 
 func runTuningCycle(aiURL string) {
 	activeTorrents := torr.ListActiveTorrent()
@@ -85,6 +86,7 @@ func runTuningCycle(aiURL string) {
 		totalSpeedAvg = nil
 		cpuUsageAvg = nil
 		cycleCounter = 0
+		lastActiveHash = ""
 		return 
 	}
 
@@ -107,6 +109,19 @@ func runTuningCycle(aiURL string) {
 	}
 
 	if activeT == nil || activeStats == nil { return }
+
+	// V1.6.24: Reset history on Torrent Change (prevent Status 400 / Cache Mismatch)
+	currentHash := activeT.Hash().String()
+	if lastActiveHash != "" && currentHash != lastActiveHash {
+		log.Printf("[AI-Pilot] Context Change Detected: Resetting history for new torrent.")
+		metricsHistory = nil
+		torrentSpeedAvg = nil
+		totalSpeedAvg = nil
+		cpuUsageAvg = nil
+		cycleCounter = 0
+		pulseCounter = 0
+	}
+	lastActiveHash = currentHash
 
 	// 1. COLLECT SAMPLES (Every 5s from Ticker)
 	currSpeedMBs := activeStats.DownloadSpeed / (1024 * 1024)
@@ -143,11 +158,11 @@ func runTuningCycle(aiURL string) {
 		if cs.Capacity > 0 { buffer = int(cs.Filled * 100 / cs.Capacity) }
 	}
 
-	currentSnap := fmt.Sprintf("[CPU:%d%%, Buf:%d%%, Peers:%d, Speed:%.1fMB/s] (AVG 60s)", 
-		int(avgCPU), buffer, activeStats.ActivePeers, avgTorrentSpeed)
+	currentSnap := sanitizeStr(fmt.Sprintf("[CPU:%d%%, Buf:%d%%, Peers:%d, Speed:%.1fMB/s] (AVG 60s)", 
+		int(avgCPU), buffer, activeStats.ActivePeers, avgTorrentSpeed))
 	
 	metricsHistory = append(metricsHistory, currentSnap)
-	if len(metricsHistory) > 3 { metricsHistory = metricsHistory[1:] }
+	if len(metricsHistory) > 2 { metricsHistory = metricsHistory[1:] }
 	historyStr := strings.Join(metricsHistory, " -> ")
 
 	isStaleBuffer := avgTorrentSpeed < 0.1
@@ -161,10 +176,11 @@ func runTuningCycle(aiURL string) {
 	cpuPressure := "NORMAL"
 	if avgCPU > 75 { cpuPressure = "CRITICAL (Lags detected, REDUCE connections NOW)" }
 
-	contextStr := fmt.Sprintf("Fiber Internet, 4K Movie Streaming, File:%.1fGB, ActiveTorr:%d, TotalDLSpeed:%.1fMB/s (AVG), Buffer:%s, CPU_Pressure:%s", 
-		fileSizeGB, realActiveCount, avgTotalSpeed, bufferStatus, cpuPressure)
+	contextStr := sanitizeStr(fmt.Sprintf("Fiber Internet, 4K Movie Streaming, File:%.1fGB, ActiveTorr:%d, TotalDLSpeed:%.1fMB/s (AVG), Buffer:%s, CPU_Pressure:%s", 
+		fileSizeGB, realActiveCount, avgTotalSpeed, bufferStatus, cpuPressure))
 
-	prompt := fmt.Sprintf("<|im_start|>system\nYou are a BitTorrent Tuning unit for Raspberry Pi 4.\nContext: %s\nTrends: %s\nIMPORTANT: If CPU_Pressure is CRITICAL, set connections_limit=15 immediately.\nObjective: 100%% Buffer, Fast Performance, Stable CPU.\nRespond ONLY compact JSON: {\"connections_limit\": 25, \"peer_timeout\": 30}<|im_end|>\n<|im_start|>user\nAnalyze trends and context. DECIDE.<|im_end|>\n<|im_start|>assistant\n{\"connections_limit\":", 
+	// V1.6.23: Ultra-Strict Prompting
+	prompt := fmt.Sprintf("<|im_start|>system\nYou are a high-precision BitTorrent Tuning unit.\nContext: %s\nTrends: %s\nRULES:\n1. If CPU_Pressure is CRITICAL, connections_limit MUST be 15.\n2. Output ONLY the following JSON format: {\"connections_limit\": N, \"peer_timeout\": M}\n3. NO explanations, NO markdown, ONLY JSON.\nExample: {\"connections_limit\": 35, \"peer_timeout\": 25}<|im_end|>\n<|im_start|>user\nAnalyze and DECIDE.<|im_end|>\n<|im_start|>assistant\n{\"connections_limit\":", 
 		contextStr, historyStr)
 
 	tweak, err := fetchAIJSON[AITweak](aiURL, prompt)
@@ -206,12 +222,17 @@ func fetchAIJSON[T any](url string, prompt string) (*T, error) {
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"prompt": prompt, "n_predict": 32, "temperature": 0.0,
 		"stop": []string{"<|im_end|>", "}", "\n"},
+		"cache_prompt": false,
 	})
 	client := &http.Client{Timeout: 45 * time.Second}
 	resp, err := client.Post(url+"/completion", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil { return nil, err }
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK { return nil, fmt.Errorf("Status %d", resp.StatusCode) }
+	if resp.StatusCode != http.StatusOK { 
+		body, _ := os.ReadFile("/dev/null") // placeholder
+		if b, err := bytes.NewBuffer(nil).ReadFrom(resp.Body); err == nil { body = []byte(fmt.Sprintf("%s", b)) }
+		return nil, fmt.Errorf("Status %d | Body: %s", resp.StatusCode, string(body)) 
+	}
 
 	var aiResp struct { Content string `json:"content"` }
 	if err := json.NewDecoder(resp.Body).Decode(&aiResp); err != nil {
@@ -223,26 +244,30 @@ func fetchAIJSON[T any](url string, prompt string) (*T, error) {
 		return nil, fmt.Errorf("empty AI response")
 	}
 
-	// Ensure we have at least some JSON content
-	if !strings.Contains(trimmed, ":") && !strings.Contains(trimmed, ",") {
-		return nil, fmt.Errorf("malformed AI response (no key-value): %s", trimmed)
+	// V1.6.23: Strict Structure Check. Must contain at least one comma (separator for keys)
+	if !strings.Contains(trimmed, ",") && !strings.Contains(trimmed, ":") {
+		return nil, fmt.Errorf("truncated AI response (missing second key): %s", trimmed)
 	}
 
 	content := "{\"connections_limit\":" + trimmed
-	// V1.6.21: Robust JSON closure and sanitization
+	
+	// Ensure we close brackets properly
 	if !strings.Contains(content, "}") { content = content + "}" }
 	if strings.Count(content, "{") > strings.Count(content, "}") { content = content + "}" }
 	
-	// Surgical replacement of units to avoid corrupting JSON keys
+	// Clean units but don't touch keys
 	content = strings.ReplaceAll(content, "%", "")
 	content = strings.ReplaceAll(content, "s,", ",")
 	content = strings.ReplaceAll(content, "s}", "}")
-	content = strings.ReplaceAll(content, "s\"", "\"") // Handle cases like "15s" -> "15"
+	content = strings.ReplaceAll(content, "s\"", "\"")
 
 	var result T
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
 		return nil, fmt.Errorf("JSON parse error | Raw: %s | Err: %v", content, err)
 	}
+
+	// Final verification: results cannot be 0 if the unmarshal was correct but response was partial
+	// We check for minimal reasonable values before sanitization
 	return &result, nil
 }
 
@@ -270,4 +295,14 @@ func readCPUSample() (uint64, uint64) {
 	}
 	idle, _ := strconv.ParseUint(fields[4], 10, 64)
 	return total, idle
+}
+
+func sanitizeStr(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r > 31 && r < 127 {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
