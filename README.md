@@ -122,8 +122,7 @@ On a standard virtual filesystem, these IDs are random and change every time the
 
 ## Health Monitor
 
-<img src="docs/screenshots/health_monitor_1.png" alt="Health Monitor — Status grid and sync controls" width="500">
-
+<p align="center"><img src="docs/screenshots/health_monitor_1.png" alt="Health Monitor — Status grid and sync controls" width="500"></p>
 
 ---
 
