@@ -65,6 +65,9 @@ This is not a torrent client with a media server bolted on. The FUSE filesystem 
 
 > Not a developer? This section explains what you actually get and why it works so well.
 
+![Plex library populated by sync scripts](docs/screenshots/library.png)
+
+
 **The end result**: you open Infuse on your Apple TV, your entire movie library appears with posters and metadata, you press Play on a 4K Dolby Vision film and it starts in under a second. No buffering. No "downloading...". No subscription to Real-Debrid or any external service. Everything runs on a Raspberry Pi in your home.
 
 ### How the three pieces fit together
@@ -687,8 +690,6 @@ Environment="GOGC=100"
 ---
 
 ## Sync Scripts
-
-![Plex library populated by sync scripts](docs/screenshots/library.png)
 
 All scripts in `scripts/` resolve `config.json` from the parent directory automatically. Override with `MKV_PROXY_CONFIG_PATH`.
 
