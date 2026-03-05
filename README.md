@@ -3,13 +3,6 @@
   <p align="center">
     <strong>The most advanced torrent engine and FUSE virtual filesystem for live streaming to your private Plex library. Forget Real-Debrid.</strong>
   </p>
-  <p align="center">
-    <img src="https://img.shields.io/badge/Platform-Raspberry%20Pi%204-c51a4a?style=flat-square&logo=raspberrypi&logoColor=white" alt="Raspberry Pi 4"/>
-    <img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.24+"/>
-    <img src="https://img.shields.io/badge/PGO-Enabled-8B5CF6?style=flat-square" alt="PGO Enabled"/>
-    <img src="https://img.shields.io/badge/FUSE-3-FF6B35?style=flat-square" alt="FUSE 3"/>
-    <img src="https://img.shields.io/badge/Plex-Integrated-E5A00D?style=flat-square&logo=plex&logoColor=white" alt="Plex"/>
-  </p>
 </p>
 
 ---
