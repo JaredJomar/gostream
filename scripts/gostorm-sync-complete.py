@@ -2450,11 +2450,17 @@ class GoStormSync:
                 self.log("INFO", f"✅ Found {len(prowlarr_streams)} streams via Prowlarr for {imdb_id}")
                 # Use same filtering as Torrentio
                 prowlarr_data = {"streams": prowlarr_streams}
+                filtered = {}
                 if content_type == "movie":
-                    return self._filter_movie_streams(prowlarr_data)
+                    filtered = self._filter_movie_streams(prowlarr_data)
                 elif content_type == "series":
-                    return self._filter_tv_streams(prowlarr_data)
-                return prowlarr_data
+                    filtered = self._filter_tv_streams(prowlarr_data)
+                else:
+                    filtered = prowlarr_data
+                
+                # Aggiungiamo il conteggio originale per il logging
+                filtered['raw_count'] = len(prowlarr_streams)
+                return filtered
         except Exception as e:
             self.log("ERROR", f"Prowlarr fetch failed: {e}")
 
@@ -3531,7 +3537,12 @@ class GoStormSync:
             streams = streams_data.get("streams", [])
             
             if not streams:
-                self.log("WARN", f"No streams found for movie: {title}")
+                # Se streams_data aveva qualcosa ma streams (filtrati) è vuoto, significa che sono stati scartati
+                if streams_data.get('raw_count', 0) > 0:
+                    self.log("INFO", f"Skip movie (no valid streams meet criteria): {title}")
+                else:
+                    self.log("WARN", f"No streams found for movie: {title}")
+                
                 self._mark_movie_no_stream(imdb_id, title)
                 continue
             self._clear_movie_no_stream(imdb_id)
