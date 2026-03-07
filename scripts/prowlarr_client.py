@@ -49,7 +49,9 @@ class ProwlarrClient:
     def _map_to_stremio_format(self, prowlarr_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Maps Prowlarr results to Stremio/Torrentio 'streams' format.
+        Fakes Torrentio name to trigger GoStorm quality filters.
         """
+        import re
         streams = []
         for res in prowlarr_results:
             title = res.get("title", "")
@@ -57,24 +59,44 @@ class ProwlarrClient:
             seeders = res.get("seeders", 0)
             leechers = res.get("leechers", 0)
             info_hash = res.get("infoHash", "")
-            indexer = res.get("indexer", "Prowlarr")
             
             if not info_hash:
                 continue
+
+            # Resolution Mapping (Prowlarr API -> Torrentio Semantics)
+            # res_val is numeric: 2160, 1080, 720
+            res_val = res.get("quality", {}).get("quality", {}).get("resolution", 0)
+            
+            if res_val == 2160:
+                res_tag = "4k"
+            elif res_val == 1080:
+                res_tag = "1080p"
+            elif res_val == 720:
+                res_tag = "720p"
+            else:
+                # Fallback to regex on title if API resolution is unknown
+                if re.search(r'2160p|4k|uhd', title, re.IGNORECASE):
+                    res_tag = "4k"
+                elif re.search(r'1080p', title, re.IGNORECASE):
+                    res_tag = "1080p"
+                elif re.search(r'720p', title, re.IGNORECASE):
+                    res_tag = "720p"
+                else:
+                    res_tag = "1080p" # Safe default
 
             # Convert size to GB for the title string
             size_gb = size_bytes / (1024 * 1024 * 1024)
             
             # Format title to match Torrentio's multiline format (essential for existing regex)
-            # Torrentio title looks like: "Movie.Title.2024.2160p.4K\n👤 123 ⬇️ 10\n23.28 GB"
             formatted_title = f"{title}\n👤 {seeders} ⬇️ {leechers}\n💾 {size_gb:.2f}GB"
             
             stream = {
-                "name": f"Prowlarr\n{indexer}",
+                # CRITICAL: Must start with "Torrentio\n" followed by resolution to trigger filters
+                "name": f"Torrentio\n{res_tag}",
                 "title": formatted_title,
                 "infoHash": info_hash,
                 "behaviorHints": {
-                    "bingeGroup": f"prowlarr-{indexer}"
+                    "bingeGroup": f"prowlarr-{res_tag}"
                 }
             }
             streams.append(stream)
