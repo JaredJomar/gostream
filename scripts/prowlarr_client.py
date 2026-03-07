@@ -12,18 +12,11 @@ from typing import List, Dict, Any, Optional
 
 class ProwlarrClient:
     def __init__(self):
-        # ── CONFIGURATION ──────────────────────────────────────────────────────
-        # Set to True to use Prowlarr, False to use Torrentio only (Default)
-        self.ENABLED = False 
+        # Configuration - Set to True to use Prowlarr, False to use Torrentio only
+        self.ENABLED = False
         
-        # Override via environment variable if present
-        if os.getenv("PROWLARR_ENABLED", "false").lower() == "true":
-            self.ENABLED = True
-            
-        self.API_KEY = os.getenv("PROWLARR_API_KEY", "YOUR_PROWLARR_API_KEY")
-        self.BASE_URL = os.getenv("PROWLARR_URL", "http://localhost:9696")
-        # ───────────────────────────────────────────────────────────────────────
-
+        self.API_KEY = "your-api-key"
+        self.BASE_URL = "http://<your-ip>:9696"
         self.SEARCH_ENDPOINT = f"{self.BASE_URL}/api/v1/search"
         self.session = requests.Session()
         self.session.headers.update({
