@@ -885,292 +885,197 @@ class GoStormTV:
         return classified
 
 
-        # ===== TORRSERVER API =====
-    
-        def _ts_add_torrent(self, magnet: str, title: str = "") -> Optional[str]:
-            """Add torrent to GoStorm, returns hash"""
-            data = {"action": "add", "link": magnet, "title": title, "save": True}
-            resp = self._post(f"{self.TORRSERVER_URL}/torrents", data, timeout=60)
-            if resp:
-                try:
-                    result = resp.json()
-                    return result.get('hash', '').lower()
-                except json.JSONDecodeError:
-                    pass
-            return None
-    
-        def _is_hash_on_disk(self, full_hash: str) -> bool:
-            """Check if any .mkv file on disk references this hash (via filename hash8)."""
-            hash8 = full_hash[:8].lower()
-            for root, dirs, files in os.walk(self.TV_DIR):
-                for f in files:
-                    if f.endswith('.mkv') and hash8 in f.lower():
-                        return True
-            return False
-    
-        def _ts_remove_torrent(self, hash_val: str) -> bool:
-            """Remove torrent from GoStorm"""
-            data = {"action": "rem", "hash": hash_val}
-            resp = self._post(f"{self.TORRSERVER_URL}/torrents", data)
-            return resp is not None
-    
-        def _ts_get_torrent(self, hash_val: str) -> Optional[Dict]:
-            """Get torrent info from GoStorm"""
-            data = {"action": "get", "hash": hash_val}
-            resp = self._post(f"{self.TORRSERVER_URL}/torrents", data)
-            if resp:
-                try:
-                    return resp.json()
-                except json.JSONDecodeError:
-                    pass
-            return None
-    
-        def _ts_list_torrents(self) -> List[Dict]:
-            """List all torrents in GoStorm"""
-            data = {"action": "list"}
-            resp = self._post(f"{self.TORRSERVER_URL}/torrents", data)
-            if resp:
-                try:
-                    return resp.json()
-                except json.JSONDecodeError:
-                    pass
-            return []
-    
-        def _wait_for_metadata(self, hash_val: str, max_wait: int = 60) -> Optional[Dict]:
-            """Wait for torrent metadata to be available"""
-            start = time.time()
-            while (time.time() - start) < max_wait:
-                info = self._ts_get_torrent(hash_val)
-                if info:
-                    file_stats = info.get('file_stats', [])
-                    if file_stats:
-                        return info
-                time.sleep(3)
-            return None
-    
-        # ===== FILE OPERATIONS =====
-    
-        def _sanitize_name(self, name: str) -> str:
-            """Sanitize show/file name for filesystem"""
-            # Remove problematic characters including quotes and ampersand
-            clean = re.sub(r'[<>:"/\\|?*\'\"&]', '', name)
-            # Replace spaces with underscores
-            clean = re.sub(r'\s+', '_', clean)
-            # Remove consecutive underscores
-            clean = re.sub(r'_+', '_', clean)
-            return clean.strip('_')
-    
-        def _get_show_folder_name(self, show_name: str, first_air_date: str) -> str:
-            """Build folder name with year for Plex disambiguation: 'Show_Name (2025)'"""
-            clean_name = self._sanitize_name(show_name)
-            year = ""
-            if first_air_date:
-                try:
-                    year = first_air_date[:4]  # Extract YYYY from YYYY-MM-DD
-                except (IndexError, TypeError):
-                    pass
-            if year:
-                return f"{clean_name} ({year})"
-            return clean_name
-    
-        def _build_filename(self, show: str, season: int, episode: int, hash8: str) -> str:
-            """Build consistent episode filename"""
-            clean_show = self._sanitize_name(show)
-            return f"{clean_show}_S{season:02d}E{episode:02d}_{hash8}.mkv"
-    
-        def _create_mkv(self, filepath: str, stream_url: str, file_size: int, magnet: str) -> bool:
-            """Create virtual .mkv file with metadata"""
+    # ===== TORRSERVER API =====
+
+    def _ts_add_torrent(self, magnet: str, title: str = "") -> Optional[str]:
+        """Add torrent to GoStorm, returns hash"""
+        data = {"action": "add", "link": magnet, "title": title, "save": True}
+        resp = self._post(f"{self.TORRSERVER_URL}/torrents", data, timeout=60)
+        if resp:
             try:
-                os.makedirs(os.path.dirname(filepath), exist_ok=True)
-                with open(filepath, 'w') as f:
-                    f.write(stream_url + '\n')
-                    f.write(str(file_size) + '\n')
-                    f.write(magnet + '\n')
-                return True
-            except IOError as e:
-                self.log("ERROR", f"Failed to create {filepath}: {e}")
-                return False
-    
-        def _is_video_file(self, path: str) -> bool:
-            """Check if file is a video"""
-            return path.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.m4v'))
-    
-        def _extract_episode_from_filename(self, filename: str) -> Optional[Tuple[int, int]]:
-            """Extract (season, episode) from filename"""
-            # S01E05 pattern
-            m = re.search(r'[Ss](\d+)[Ee](\d+)', filename)
-            if m:
-                return (int(m.group(1)), int(m.group(2)))
-            # 1x05 pattern
-            m = re.search(r'(\d+)x(\d+)', filename)
-            if m:
-                return (int(m.group(1)), int(m.group(2)))
-            return None
-    
-        # ===== EPISODE PROCESSING =====
-    
-        def _process_fullpack(self, show_name: str, stream: Dict, first_air_date: str = "") -> int:
-            """
-            Process fullpack stream - create episodes from torrent files
-            Returns number of episodes created
-            """
-            hash_val = stream['hash']
-            title = stream['title']
-            quality_score = stream['quality_score']
-    
-            # Build magnet with trackers for faster resolution
-            magnet = self._build_magnet(hash_val, title)
-    
-            # Add to GoStorm
-            added_hash = self._ts_add_torrent(magnet, title)
-            if not added_hash:
-                self.log("WARN", f"Failed to add fullpack: {title[:60]}...")
-                return 0
-    
-            # Wait for metadata
-            info = self._wait_for_metadata(added_hash, max_wait=90)
-            if not info:
-                self.log("WARN", f"Metadata timeout for fullpack: {title[:60]}...")
-                self._ts_remove_torrent(added_hash)
-                return 0
-    
-            # Process video files
-            file_stats = info.get('file_stats', [])
-            video_files = [f for f in file_stats if self._is_video_file(f.get('path', ''))]
-    
-            if not video_files:
-                self.log("WARN", f"No video files in fullpack: {title[:60]}...")
-                return 0
-    
-            created = 0
-            clean_show = self._get_show_folder_name(show_name, first_air_date)
-    
-            for vf in video_files:
-                filepath = vf.get('path', '')
-                file_id = vf.get('id', 0)
-                file_size = vf.get('length', 0)
-    
-                # Size filter
-                if file_size < self.MIN_EPISODE_SIZE or file_size > self.MAX_EPISODE_SIZE:
-                    continue
-    
-                # Extract episode info
-                filename = os.path.basename(filepath)
-                ep_info = self._extract_episode_from_filename(filename)
-                if not ep_info:
-                    continue
-    
-                season, episode = ep_info
-                key = self._episode_key(show_name, season, episode)
-    
-                # Skip if already processed this run
-                if key in self._processed_this_run:
-                    continue
-    
-                # Check registry for existing version
-                if key in self._registry:
-                    existing = self._registry[key]
-                    if quality_score <= existing['quality_score'] * self.UPGRADE_THRESHOLD:
-                        self._stats['episodes_skipped'] += 1
-                        self._processed_this_run.add(key)
-                        continue
-                    # Upgrade - remove old file
-                    old_path = existing.get('file_path', '')
-                    if old_path and os.path.exists(old_path):
-                        try:
-                            os.remove(old_path)
-                            self.log("INFO", f"Removed inferior version: {os.path.basename(old_path)}")
-                            self._stats['upgrades'] += 1
-                        except OSError:
-                            pass
-    
-                # Create season directory (format: Season.01 to match Movies script)
-                season_dir = os.path.join(self.TV_DIR, clean_show, f"Season.{season:02d}")
-    
-                # Build filename and path
-                ep_filename = self._build_filename(show_name, season, episode, hash_val[:8])
-                ep_path = os.path.join(season_dir, ep_filename)
-    
-                # Create stream URL
-                stream_url = f"{self.TORRSERVER_URL}/stream?link={hash_val}&index={file_id}&play"
-    
-                # Create .mkv file
-                if self._create_mkv(ep_path, stream_url, file_size, magnet):
-                    self._register_episode(key, quality_score, hash_val, ep_path, "fullpack")
-                    self._processed_this_run.add(key)
-                    self._stats['episodes_created'] += 1
-                    created += 1
-                    self.log("INFO", f"Created: {ep_filename}")
-    
-            # Clean up: remove torrent from GoStorm if no episodes were created
-            if created == 0 and added_hash:
-                self._ts_remove_torrent(added_hash)
-                self.log("DEBUG", f"Removed unused fullpack (0 episodes created): {title[:60]}...")
-    
-            return created
-    
-        def _process_single(self, show_name: str, stream: Dict, first_air_date: str = "") -> int:
-            """
-            Process single episode stream
-            Returns 1 if created, 0 otherwise
-            """
-            hash_val = stream['hash']
-            title = stream['title']
-            quality_score = stream['quality_score']
-            season = stream['season']
-    
-            # Extract episode number from title
-            m = re.search(r'[Ss]\d+[Ee](\d+)', title)
-            if not m:
-                return 0
-            episode = int(m.group(1))
-    
+                result = resp.json()
+                return result.get('hash', '').lower()
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    def _is_hash_on_disk(self, full_hash: str) -> bool:
+        """Check if any .mkv file on disk references this hash (via filename hash8)."""
+        hash8 = full_hash[:8].lower()
+        for root, dirs, files in os.walk(self.TV_DIR):
+            for f in files:
+                if f.endswith('.mkv') and hash8 in f.lower():
+                    return True
+        return False
+
+    def _ts_remove_torrent(self, hash_val: str) -> bool:
+        """Remove torrent from GoStorm"""
+        data = {"action": "rem", "hash": hash_val}
+        resp = self._post(f"{self.TORRSERVER_URL}/torrents", data)
+        return resp is not None
+
+    def _ts_get_torrent(self, hash_val: str) -> Optional[Dict]:
+        """Get torrent info from GoStorm"""
+        data = {"action": "get", "hash": hash_val}
+        resp = self._post(f"{self.TORRSERVER_URL}/torrents", data)
+        if resp:
+            try:
+                return resp.json()
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    def _ts_list_torrents(self) -> List[Dict]:
+        """List all torrents in GoStorm"""
+        data = {"action": "list"}
+        resp = self._post(f"{self.TORRSERVER_URL}/torrents", data)
+        if resp:
+            try:
+                return resp.json()
+            except json.JSONDecodeError:
+                pass
+        return []
+
+    def _wait_for_metadata(self, hash_val: str, max_wait: int = 60) -> Optional[Dict]:
+        """Wait for torrent metadata to be available"""
+        start = time.time()
+        while (time.time() - start) < max_wait:
+            info = self._ts_get_torrent(hash_val)
+            if info:
+                file_stats = info.get('file_stats', [])
+                if file_stats:
+                    return info
+            time.sleep(3)
+        return None
+
+    # ===== FILE OPERATIONS =====
+
+    def _sanitize_name(self, name: str) -> str:
+        """Sanitize show/file name for filesystem"""
+        # Remove problematic characters including quotes and ampersand
+        clean = re.sub(r'[<>:"/\\|?*\'\"&]', '', name)
+        # Replace spaces with underscores
+        clean = re.sub(r'\s+', '_', clean)
+        # Remove consecutive underscores
+        clean = re.sub(r'_+', '_', clean)
+        return clean.strip('_')
+
+    def _get_show_folder_name(self, show_name: str, first_air_date: str) -> str:
+        """Build folder name with year for Plex disambiguation: 'Show_Name (2025)'"""
+        clean_name = self._sanitize_name(show_name)
+        year = ""
+        if first_air_date:
+            try:
+                year = first_air_date[:4]  # Extract YYYY from YYYY-MM-DD
+            except (IndexError, TypeError):
+                pass
+        if year:
+            return f"{clean_name} ({year})"
+        return clean_name
+
+    def _build_filename(self, show: str, season: int, episode: int, hash8: str) -> str:
+        """Build consistent episode filename"""
+        clean_show = self._sanitize_name(show)
+        return f"{clean_show}_S{season:02d}E{episode:02d}_{hash8}.mkv"
+
+    def _create_mkv(self, filepath: str, stream_url: str, file_size: int, magnet: str) -> bool:
+        """Create virtual .mkv file with metadata"""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w') as f:
+                f.write(stream_url + '\n')
+                f.write(str(file_size) + '\n')
+                f.write(magnet + '\n')
+            return True
+        except IOError as e:
+            self.log("ERROR", f"Failed to create {filepath}: {e}")
+            return False
+
+    def _is_video_file(self, path: str) -> bool:
+        """Check if file is a video"""
+        return path.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.m4v'))
+
+    def _extract_episode_from_filename(self, filename: str) -> Optional[Tuple[int, int]]:
+        """Extract (season, episode) from filename"""
+        # S01E05 pattern
+        m = re.search(r'[Ss](\d+)[Ee](\d+)', filename)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        # 1x05 pattern
+        m = re.search(r'(\d+)x(\d+)', filename)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        return None
+
+    # ===== EPISODE PROCESSING =====
+
+    def _process_fullpack(self, show_name: str, stream: Dict, first_air_date: str = "") -> int:
+        """
+        Process fullpack stream - create episodes from torrent files
+        Returns number of episodes created
+        """
+        hash_val = stream['hash']
+        title = stream['title']
+        quality_score = stream['quality_score']
+
+        # Build magnet with trackers for faster resolution
+        magnet = self._build_magnet(hash_val, title)
+
+        # Add to GoStorm
+        added_hash = self._ts_add_torrent(magnet, title)
+        if not added_hash:
+            self.log("WARN", f"Failed to add fullpack: {title[:60]}...")
+            return 0
+
+        # Wait for metadata
+        info = self._wait_for_metadata(added_hash, max_wait=90)
+        if not info:
+            self.log("WARN", f"Metadata timeout for fullpack: {title[:60]}...")
+            self._ts_remove_torrent(added_hash)
+            return 0
+
+        # Process video files
+        file_stats = info.get('file_stats', [])
+        video_files = [f for f in file_stats if self._is_video_file(f.get('path', ''))]
+
+        if not video_files:
+            self.log("WARN", f"No video files in fullpack: {title[:60]}...")
+            return 0
+
+        created = 0
+        clean_show = self._get_show_folder_name(show_name, first_air_date)
+
+        for vf in video_files:
+            filepath = vf.get('path', '')
+            file_id = vf.get('id', 0)
+            file_size = vf.get('length', 0)
+
+            # Size filter
+            if file_size < self.MIN_EPISODE_SIZE or file_size > self.MAX_EPISODE_SIZE:
+                continue
+
+            # Extract episode info
+            filename = os.path.basename(filepath)
+            ep_info = self._extract_episode_from_filename(filename)
+            if not ep_info:
+                continue
+
+            season, episode = ep_info
             key = self._episode_key(show_name, season, episode)
-    
-            # Skip if already processed
+
+            # Skip if already processed this run
             if key in self._processed_this_run:
-                return 0
-    
-            # Check registry
+                continue
+
+            # Check registry for existing version
             if key in self._registry:
                 existing = self._registry[key]
                 if quality_score <= existing['quality_score'] * self.UPGRADE_THRESHOLD:
                     self._stats['episodes_skipped'] += 1
                     self._processed_this_run.add(key)
-                    return 0
-    
-            # Build magnet with trackers and add to GoStorm
-            magnet = self._build_magnet(hash_val, title)
-            added_hash = self._ts_add_torrent(magnet, title)
-            if not added_hash:
-                return 0
-    
-            # Wait for metadata
-            info = self._wait_for_metadata(added_hash, max_wait=45)
-            if not info:
-                self._ts_remove_torrent(added_hash)
-                return 0
-    
-            # Find the video file
-            file_stats = info.get('file_stats', [])
-            video_files = [f for f in file_stats if self._is_video_file(f.get('path', ''))]
-    
-            if not video_files:
-                return 0
-    
-            # Use largest video file
-            video_files.sort(key=lambda x: x.get('length', 0), reverse=True)
-            vf = video_files[0]
-            file_id = vf.get('id', 0)
-            file_size = vf.get('length', 0)
-    
-            # Size filter
-            if file_size < self.MIN_EPISODE_SIZE:
-                return 0
-    
-            # If upgrading, remove old
-            if key in self._registry:
-                old_path = self._registry[key].get('file_path', '')
+                    continue
+                # Upgrade - remove old file
+                old_path = existing.get('file_path', '')
                 if old_path and os.path.exists(old_path):
                     try:
                         os.remove(old_path)
@@ -1178,496 +1083,592 @@ class GoStormTV:
                         self._stats['upgrades'] += 1
                     except OSError:
                         pass
-    
-            # Create paths (format: Season.01 to match Movies script)
-            clean_show = self._get_show_folder_name(show_name, first_air_date)
+
+            # Create season directory (format: Season.01 to match Movies script)
             season_dir = os.path.join(self.TV_DIR, clean_show, f"Season.{season:02d}")
+
+            # Build filename and path
             ep_filename = self._build_filename(show_name, season, episode, hash_val[:8])
             ep_path = os.path.join(season_dir, ep_filename)
-    
+
+            # Create stream URL
             stream_url = f"{self.TORRSERVER_URL}/stream?link={hash_val}&index={file_id}&play"
-    
+
+            # Create .mkv file
             if self._create_mkv(ep_path, stream_url, file_size, magnet):
-                self._register_episode(key, quality_score, hash_val, ep_path, "single")
+                self._register_episode(key, quality_score, hash_val, ep_path, "fullpack")
                 self._processed_this_run.add(key)
                 self._stats['episodes_created'] += 1
+                created += 1
                 self.log("INFO", f"Created: {ep_filename}")
-                return 1
-    
+
+        # Clean up: remove torrent from GoStorm if no episodes were created
+        if created == 0 and added_hash:
+            self._ts_remove_torrent(added_hash)
+            self.log("DEBUG", f"Removed unused fullpack (0 episodes created): {title[:60]}...")
+
+        return created
+
+    def _process_single(self, show_name: str, stream: Dict, first_air_date: str = "") -> int:
+        """
+        Process single episode stream
+        Returns 1 if created, 0 otherwise
+        """
+        hash_val = stream['hash']
+        title = stream['title']
+        quality_score = stream['quality_score']
+        season = stream['season']
+
+        # Extract episode number from title
+        m = re.search(r'[Ss]\d+[Ee](\d+)', title)
+        if not m:
             return 0
-    
-        def _get_complete_seasons(self, show_name: str, tmdb_id: int) -> Dict[int, Tuple[int, float]]:
-            """
-            Check which seasons are already complete with good quality.
-            Returns dict: {season_num: (episode_count, avg_quality_score)}
-            """
-            # Normalize show name for registry lookup
-            normalized = re.sub(r'[^a-z0-9]', '', show_name.lower())
-    
-            # Get total episodes per season from TMDB
-            details = self._fetch_show_details(tmdb_id)
-            if not details:
-                return {}
-    
-            seasons_info = {}
-            for season_data in details.get('seasons', []):
-                season_num = season_data.get('season_number', 0)
-                if season_num == 0:  # Skip specials
-                    continue
-                episode_count = season_data.get('episode_count', 0)
-                if episode_count > 0:
-                    seasons_info[season_num] = episode_count
-    
-            # Count episodes in registry per season and calculate avg score
-            complete_seasons = {}
-            for season_num, expected_count in seasons_info.items():
-                episodes_found = []
-                for key, entry in self._registry.items():
-                    # Match pattern: showname_s01e05
-                    if key.startswith(normalized) and f'_s{season_num:02d}e' in key:
-                        episodes_found.append(entry.get('quality_score', 0))
-    
-                if len(episodes_found) >= expected_count:
-                    avg_score = sum(episodes_found) / len(episodes_found) if episodes_found else 0
-                    complete_seasons[season_num] = (len(episodes_found), avg_score)
-    
-            return complete_seasons
-    
-        def _should_skip_season(self, season_num: int, complete_seasons: Dict[int, Tuple[int, float]]) -> bool:
-            """Check if a season should be skipped (complete with good quality)"""
-            if season_num not in complete_seasons:
-                return False
-    
-            episode_count, avg_score = complete_seasons[season_num]
-            # Skip if complete and quality is good enough
-            return avg_score >= self.MIN_QUALITY_SKIP
-    
-        def process_show(self, show: Dict) -> int:
-            """
-            Process a TV show - get streams, sort, and create episodes
-            Skips seasons that are already complete with good quality.
-            Returns total episodes created
-            """
-            show_name = show.get('name') or show.get('original_name', '')
-            tmdb_id = show.get('id')
-            first_air_date = show.get('first_air_date', '')
-    
-            if not show_name or not tmdb_id:
+        episode = int(m.group(1))
+
+        key = self._episode_key(show_name, season, episode)
+
+        # Skip if already processed
+        if key in self._processed_this_run:
+            return 0
+
+        # Check registry
+        if key in self._registry:
+            existing = self._registry[key]
+            if quality_score <= existing['quality_score'] * self.UPGRADE_THRESHOLD:
+                self._stats['episodes_skipped'] += 1
+                self._processed_this_run.add(key)
                 return 0
-    
-            # V135: Blacklist check at SHOW level (not just torrent level)
-            clean_show_name = self._normalize_title(show_name)
-            if clean_show_name in self._blacklist.get("titles", []):
-                self.log("INFO", f"🚫 Blacklist: skipping show '{show_name}' (normalized: {clean_show_name})")
-                return 0
-    
-            # Get IMDB ID
-            imdb_id = self._get_imdb_id(tmdb_id)
-            if not imdb_id:
-                self.log("DEBUG", f"No IMDB ID for: {show_name}")
-                return 0
-    
-            self.log("INFO", f"Processing: {show_name} ({imdb_id})")
-    
-            # Check which seasons are already complete with good quality
-            complete_seasons = self._get_complete_seasons(show_name, tmdb_id)
-            skipped_seasons = set()
-            for season_num, (ep_count, avg_score) in complete_seasons.items():
-                if avg_score >= self.MIN_QUALITY_SKIP:
-                    skipped_seasons.add(season_num)
-                    self.log("DEBUG", f"Skip S{season_num:02d}: {ep_count} eps, avg score {avg_score:.0f} >= {self.MIN_QUALITY_SKIP}")
-    
-            if skipped_seasons:
-                self.log("INFO", f"Skipping seasons {sorted(skipped_seasons)} (complete, quality >= {self.MIN_QUALITY_SKIP})")
-    
-            # Get and sort streams (pass tmdb_id to get correct number of seasons)
-            streams = self.get_streams(imdb_id, tmdb_id)
-            if not streams:
-                self.log("DEBUG", f"No streams for: {show_name}")
-                return 0
-    
-            self.log("DEBUG", f"Found {len(streams)} streams for {show_name}")
-    
-            # Sort streams by priority (highest first) - complete fullpacks before partials before singles
-            streams = sorted(streams, key=lambda x: -x['priority'])
-    
-            created = 0
-            seasons_with_complete_fullpack = set()
-            seasons_episode_count = {}  # Track total episodes created per season
-    
-            # Get expected episode counts per season from TMDB
-            tmdb_season_eps = {}
-            details = self._fetch_show_details(tmdb_id)
-            if details:
-                for sd in details.get('seasons', []):
-                    sn = sd.get('season_number', 0)
-                    ec = sd.get('episode_count', 0)
-                    if sn > 0 and ec > 0:
-                        tmdb_season_eps[sn] = ec
-    
-            # Process fullpacks first (now properly sorted by priority)
-            for stream in streams:
-                if not stream['is_fullpack']:
-                    continue
-    
-                season = stream['season']
-                # Skip if already complete with good quality
-                if season in skipped_seasons:
-                    continue
-                # Skip if we already have enough episodes for this season
-                if season in seasons_with_complete_fullpack:
-                    continue
-    
-                count = self._process_fullpack(show_name, stream, first_air_date)
-                if count > 0:
-                    created += count
-                    seasons_episode_count[season] = seasons_episode_count.get(season, 0) + count
-                    # Mark season complete when we have all episodes (from TMDB) or fallback 80%
-                    expected = tmdb_season_eps.get(season, 0)
-                    total = seasons_episode_count[season]
-                    if expected > 0 and total >= expected:
-                        seasons_with_complete_fullpack.add(season)
-                    elif not stream.get('is_partial_pack', False) and expected == 0 and count >= 5:
-                        # Fallback if TMDB has no data for this season
-                        seasons_with_complete_fullpack.add(season)
-    
-            # Process singles for seasons without fullpacks
-            singles_limit = 15  # Max singles per show to prevent overload
-            singles_processed = 0
-    
-            for stream in streams:
-                if stream['is_fullpack']:
-                    continue
-                if singles_processed >= singles_limit:
-                    break
-    
-                season = stream['season']
-                # Skip if already complete with good quality
-                if season in skipped_seasons:
-                    continue
-                if season in seasons_with_complete_fullpack:
-                    continue
-    
-                count = self._process_single(show_name, stream, first_air_date)
-                created += count
-                singles_processed += 1
-    
-            if created > 0:
-                self._stats['shows'] += 1
-                # Save registry incrementally after each show with new episodes
-                self._save_registry()
-    
-            return created
-    
-        # ===== CLEANUP =====
-    
-        def cleanup_orphaned_files(self):
-            """Remove .mkv files not in registry"""
-            if not os.path.exists(self.TV_DIR):
-                return
-    
-            removed = 0
-            registry_paths = {v['file_path'] for v in self._registry.values()}
-    
-            for root, dirs, files in os.walk(self.TV_DIR):
-                for f in files:
-                    if not f.endswith('.mkv'):
-                        continue
-    
-                    filepath = os.path.join(root, f)
-                    if filepath not in registry_paths:
-                        try:
-                            os.remove(filepath)
-                            self.log("INFO", f"Removed orphaned: {f}")
-                            removed += 1
-                        except OSError as e:
-                            self.log("WARN", f"Failed to remove {f}: {e}")
-    
-            # Remove empty directories
-            for root, dirs, files in os.walk(self.TV_DIR, topdown=False):
-                for d in dirs:
-                    dirpath = os.path.join(root, d)
-                    try:
-                        if not os.listdir(dirpath):
-                            os.rmdir(dirpath)
-                    except OSError:
-                        pass
-    
-            if removed:
-                self.log("INFO", f"Cleanup complete: removed {removed} orphaned files")
-    
-        def cleanup_orphaned_torrents(self):
-            """Remove torrents not referenced by any .mkv file"""
-            torrents = self._ts_list_torrents()
-            if not torrents:
-                return
-    
-            # Get all hashes from registry
-            registry_hashes = {v['hash'].lower() for v in self._registry.values()}
-    
-            removed = 0
-            for t in torrents:
-                h = (t.get('hash') or '').lower()
-                if not h:
-                    continue
-    
-                # Check if TV torrent (has series pattern in title)
-                title = t.get('title', '').lower()
-                if not re.search(r's\d+e\d+|season|episode', title):
-                    continue  # Skip non-TV torrents
-    
-                if h not in registry_hashes:
-                    if not self._is_hash_on_disk(h):
-                        if self._ts_remove_torrent(h):
-                            removed += 1
-                            self.log("INFO", f"Removed orphaned torrent: {h[:8]}...")
-                    else:
-                        self.log("DEBUG", f"Torrent {h[:8]} not in registry but found on disk, keeping")
-    
-            if removed:
-                self.log("INFO", f"Removed {removed} orphaned torrents")
-    
-        def rehydrate_missing_torrents(self):
-            """
-            Re-add torrents for .mkv files where torrent is no longer active.
-            Reads magnet URL from third line of .mkv file and re-adds with fresh trackers.
-            """
-            # Get active torrent hashes
-            torrents = self._ts_list_torrents()
-            active_hashes = {(t.get('hash') or '').lower() for t in torrents if t.get('hash')}
-    
-            rehydrated = 0
-            MAX_REHYDRATE_PER_RUN = 20  # Limit to prevent GoStorm saturation
-    
-            if not os.path.exists(self.TV_DIR):
-                return
-    
-            self.log("INFO", "Scanning for missing torrents to rehydrate...")
-            
-            for root, _, files in os.walk(self.TV_DIR):
-                if rehydrated >= MAX_REHYDRATE_PER_RUN:
-                    self.log("INFO", f"Reached limit of {MAX_REHYDRATE_PER_RUN} rehydrations, stopping scan.")
-                    break
-    
-                for filename in files:
-                    if not filename.lower().endswith('.mkv'):
-                        continue
-    
-                    if rehydrated >= MAX_REHYDRATE_PER_RUN:
-                        break
-    
-                    filepath = os.path.join(root, filename)
-                    try:
-                        with open(filepath, 'r') as f:
-                            lines = f.readlines()
-    
-                        if len(lines) < 3:
-                            continue
-    
-                        stream_line = lines[0].strip()
-                        magnet_line = lines[2].strip()
-    
-                        # Extract hash from stream URL
-                        hash_match = re.search(r'link=([a-f0-9]{40})', stream_line, re.IGNORECASE)
-                        if not hash_match:
-                            continue
-    
-                        hash_val = hash_match.group(1).lower()
-    
-                        # Skip if torrent already active
-                        if hash_val in active_hashes:
-                            continue
-    
-                        # Rehydrate with fresh magnet (new trackers)
-                        if magnet_line.startswith('magnet:?'):
-                            self.log("INFO", f"Rehydrating ({rehydrated+1}/{MAX_REHYDRATE_PER_RUN}): {filename}...")
-                            # Rebuild magnet with dynamic trackers
-                            fresh_magnet = self._build_magnet(hash_val)
-                            if self._ts_add_torrent(fresh_magnet, filename):
-                                rehydrated += 1
-                                active_hashes.add(hash_val)  # Prevent duplicate adds
-                                # CRITICAL: Sleep between adds to let GoStorm resolve DHT/Metadata
-                                time.sleep(5) 
-    
-                    except Exception as e:
-                        self.log("DEBUG", f"Error reading {filename}: {e}")
-                        continue
-    
-            if rehydrated > 0:
-                self.log("INFO", f"Rehydrated {rehydrated} missing torrents")
-            else:
-                self.log("DEBUG", "No torrents needed rehydration")
-    
-        # ===== INSTANCE MANAGEMENT =====
-    
-        def _kill_existing_instances(self):
-            """
-            Ensure single instance using atomic file locking (fcntl.flock).
-            This is the standard Unix approach - no race conditions possible.
-            """
-            import fcntl
-            import atexit
-    
-            lock_file = "/tmp/gostorm-tv-sync.lock"
-            pid_file = "/tmp/gostorm-tv-sync.pid"
-    
-            # Open lock file (create if not exists)
-            try:
-                self._lock_fd = open(lock_file, 'w')
-            except IOError as e:
-                self.log("ERROR", f"Cannot create lock file: {e}")
-                sys.exit(1)
-    
-            # Try to acquire EXCLUSIVE lock (non-blocking)
-            try:
-                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except IOError:
-                # Lock held by another process - check if it's alive
+
+        # Build magnet with trackers and add to GoStorm
+        magnet = self._build_magnet(hash_val, title)
+        added_hash = self._ts_add_torrent(magnet, title)
+        if not added_hash:
+            return 0
+
+        # Wait for metadata
+        info = self._wait_for_metadata(added_hash, max_wait=45)
+        if not info:
+            self._ts_remove_torrent(added_hash)
+            return 0
+
+        # Find the video file
+        file_stats = info.get('file_stats', [])
+        video_files = [f for f in file_stats if self._is_video_file(f.get('path', ''))]
+
+        if not video_files:
+            return 0
+
+        # Use largest video file
+        video_files.sort(key=lambda x: x.get('length', 0), reverse=True)
+        vf = video_files[0]
+        file_id = vf.get('id', 0)
+        file_size = vf.get('length', 0)
+
+        # Size filter
+        if file_size < self.MIN_EPISODE_SIZE:
+            return 0
+
+        # If upgrading, remove old
+        if key in self._registry:
+            old_path = self._registry[key].get('file_path', '')
+            if old_path and os.path.exists(old_path):
                 try:
-                    with open(pid_file, 'r') as f:
-                        old_pid = int(f.read().strip())
-                    os.kill(old_pid, 0)  # Check if process exists
-                    self.log("ERROR", f"Another instance already running (PID {old_pid}). Exiting.")
-                    self._lock_fd.close()
-                    sys.exit(1)
-                except (ProcessLookupError, ValueError, FileNotFoundError, PermissionError):
-                    # Stale lock - old process crashed
-                    self.log("WARN", "Stale lock detected, forcing acquisition...")
-                    fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX)
-    
-            # Write our PID
-            try:
-                with open(pid_file, 'w') as f:
-                    f.write(str(os.getpid()))
-            except IOError:
-                pass
-    
-            self.log("INFO", f"Lock acquired, running as PID {os.getpid()}")
-            atexit.register(self._release_lock)
-    
-        def _release_lock(self):
-            """Release lock file on exit."""
-            import fcntl
-    
-            lock_file = "/tmp/gostorm-tv-sync.lock"
-            pid_file = "/tmp/gostorm-tv-sync.pid"
-    
-            try:
-                if hasattr(self, '_lock_fd') and self._lock_fd:
-                    fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
-                    self._lock_fd.close()
-                    self._lock_fd = None
-            except:
-                pass
-    
-            try:
-                os.remove(pid_file)
-                os.remove(lock_file)
-            except:
-                pass
-    
-        # ===== MAIN EXECUTION =====
-    
-        def run(self, max_shows: int = 0) -> bool:
-            """
-            Main execution: discover shows, process, cleanup
-            max_shows: limit processing (0 = unlimited)
-            """
-            # Ensure single instance
-            self._kill_existing_instances()
-    
-            start_time = time.time()
-            self.log("INFO", "=" * 60)
-            self.log("INFO", "GoStorm TV Sync - Starting")
-            self.log("INFO", f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            self.log("INFO", "=" * 60)
-    
-            try:
-                # Protect existing files from cleanup (for shows now filtered by age/genre)
-                self._populate_registry_from_existing()
-    
-                # Discover shows
-                shows = self.discover_shows()
-                if not shows:
-                    self.log("WARN", "No shows discovered")
-                    return False
-    
-                # Limit if requested
-                if max_shows > 0:
-                    shows = shows[:max_shows]
-                    self.log("INFO", f"Limited to {max_shows} shows")
-    
-                # Process each show
-                for i, show in enumerate(shows, 1):
-                    # Check for graceful shutdown request
-                    if _shutdown_requested:
-                        self.log("INFO", "Shutdown requested, saving registry and exiting...")
-                        self._save_registry()
-                        self.log("INFO", f"Registry saved with {len(self._registry)} episodes")
-                        return True
-    
-                    name = show.get('name') or show.get('original_name', '')
-                    self.log("INFO", f"[{i}/{len(shows)}] {name}")
-                    self.process_show(show)
-    
-                # Save registry
-                self._save_registry()
-                self.log("INFO", "Registry saved")
-    
-                # Cleanup
-                self.log("INFO", "Running cleanup...")
-                self.cleanup_orphaned_files()
-                self.cleanup_orphaned_torrents()
-    
-                # Rehydrate missing torrents (re-add from saved magnets)
-                self.log("INFO", "Checking for torrents to rehydrate...")
-                self.rehydrate_missing_torrents()
-    
-                # Stats
-                elapsed = time.time() - start_time
-                self.log("INFO", "=" * 60)
-                self.log("INFO", "Sync Complete!")
-                self.log("INFO", f"Shows processed: {self._stats['shows']}")
-                self.log("INFO", f"Episodes created: {self._stats['episodes_created']}")
-                self.log("INFO", f"Episodes skipped: {self._stats['episodes_skipped']}")
-                self.log("INFO", f"Upgrades: {self._stats['upgrades']}")
-                self.log("INFO", f"Registry size: {len(self._registry)} episodes")
-                self.log("INFO", f"Duration: {elapsed:.1f}s")
-                self.log("INFO", "=" * 60)
-    
-                # Trigger Plex refresh for TV library
-                tv_lib_id = _cfg.get('plex', {}).get('tv_library_id', 0)
-                if tv_lib_id:
-                    self.notify_plex(tv_lib_id)
-    
-                return True
-    
-            except Exception as e:
-                self.log("ERROR", f"Fatal error: {e}")
-                import traceback
-                traceback.print_exc()
-                return False
-    
-    
-    def main():
-        """Entry point"""
-        import argparse
-    
-        parser = argparse.ArgumentParser(description='GoStorm TV Sync')
-        parser.add_argument('--max-shows', type=int, default=0,
-                            help='Limit number of shows to process (0=unlimited)')
-        parser.add_argument('--dry-run', action='store_true',
-                            help='Show what would be done without making changes')
-        args = parser.parse_args()
-    
-        if args.dry_run:
-            print("Dry-run mode not yet implemented")
+                    os.remove(old_path)
+                    self.log("INFO", f"Removed inferior version: {os.path.basename(old_path)}")
+                    self._stats['upgrades'] += 1
+                except OSError:
+                    pass
+
+        # Create paths (format: Season.01 to match Movies script)
+        clean_show = self._get_show_folder_name(show_name, first_air_date)
+        season_dir = os.path.join(self.TV_DIR, clean_show, f"Season.{season:02d}")
+        ep_filename = self._build_filename(show_name, season, episode, hash_val[:8])
+        ep_path = os.path.join(season_dir, ep_filename)
+
+        stream_url = f"{self.TORRSERVER_URL}/stream?link={hash_val}&index={file_id}&play"
+
+        if self._create_mkv(ep_path, stream_url, file_size, magnet):
+            self._register_episode(key, quality_score, hash_val, ep_path, "single")
+            self._processed_this_run.add(key)
+            self._stats['episodes_created'] += 1
+            self.log("INFO", f"Created: {ep_filename}")
             return 1
-    
-        sync = GoStormTV()
-        success = sync.run(max_shows=args.max_shows)
-        return 0 if success else 1
-    
-    
-    if __name__ == "__main__":
-        sys.exit(main())
+
+        return 0
+
+    def _get_complete_seasons(self, show_name: str, tmdb_id: int) -> Dict[int, Tuple[int, float]]:
+        """
+        Check which seasons are already complete with good quality.
+        Returns dict: {season_num: (episode_count, avg_quality_score)}
+        """
+        # Normalize show name for registry lookup
+        normalized = re.sub(r'[^a-z0-9]', '', show_name.lower())
+
+        # Get total episodes per season from TMDB
+        details = self._fetch_show_details(tmdb_id)
+        if not details:
+            return {}
+
+        seasons_info = {}
+        for season_data in details.get('seasons', []):
+            season_num = season_data.get('season_number', 0)
+            if season_num == 0:  # Skip specials
+                continue
+            episode_count = season_data.get('episode_count', 0)
+            if episode_count > 0:
+                seasons_info[season_num] = episode_count
+
+        # Count episodes in registry per season and calculate avg score
+        complete_seasons = {}
+        for season_num, expected_count in seasons_info.items():
+            episodes_found = []
+            for key, entry in self._registry.items():
+                # Match pattern: showname_s01e05
+                if key.startswith(normalized) and f'_s{season_num:02d}e' in key:
+                    episodes_found.append(entry.get('quality_score', 0))
+
+            if len(episodes_found) >= expected_count:
+                avg_score = sum(episodes_found) / len(episodes_found) if episodes_found else 0
+                complete_seasons[season_num] = (len(episodes_found), avg_score)
+
+        return complete_seasons
+
+    def _should_skip_season(self, season_num: int, complete_seasons: Dict[int, Tuple[int, float]]) -> bool:
+        """Check if a season should be skipped (complete with good quality)"""
+        if season_num not in complete_seasons:
+            return False
+
+        episode_count, avg_score = complete_seasons[season_num]
+        # Skip if complete and quality is good enough
+        return avg_score >= self.MIN_QUALITY_SKIP
+
+    def process_show(self, show: Dict) -> int:
+        """
+        Process a TV show - get streams, sort, and create episodes
+        Skips seasons that are already complete with good quality.
+        Returns total episodes created
+        """
+        show_name = show.get('name') or show.get('original_name', '')
+        tmdb_id = show.get('id')
+        first_air_date = show.get('first_air_date', '')
+
+        if not show_name or not tmdb_id:
+            return 0
+
+        # V135: Blacklist check at SHOW level (not just torrent level)
+        clean_show_name = self._normalize_title(show_name)
+        if clean_show_name in self._blacklist.get("titles", []):
+            self.log("INFO", f"🚫 Blacklist: skipping show '{show_name}' (normalized: {clean_show_name})")
+            return 0
+
+        # Get IMDB ID
+        imdb_id = self._get_imdb_id(tmdb_id)
+        if not imdb_id:
+            self.log("DEBUG", f"No IMDB ID for: {show_name}")
+            return 0
+
+        self.log("INFO", f"Processing: {show_name} ({imdb_id})")
+
+        # Check which seasons are already complete with good quality
+        complete_seasons = self._get_complete_seasons(show_name, tmdb_id)
+        skipped_seasons = set()
+        for season_num, (ep_count, avg_score) in complete_seasons.items():
+            if avg_score >= self.MIN_QUALITY_SKIP:
+                skipped_seasons.add(season_num)
+                self.log("DEBUG", f"Skip S{season_num:02d}: {ep_count} eps, avg score {avg_score:.0f} >= {self.MIN_QUALITY_SKIP}")
+
+        if skipped_seasons:
+            self.log("INFO", f"Skipping seasons {sorted(skipped_seasons)} (complete, quality >= {self.MIN_QUALITY_SKIP})")
+
+        # Get and sort streams (pass tmdb_id to get correct number of seasons)
+        streams = self.get_streams(imdb_id, tmdb_id)
+        if not streams:
+            self.log("DEBUG", f"No streams for: {show_name}")
+            return 0
+
+        self.log("DEBUG", f"Found {len(streams)} streams for {show_name}")
+
+        # Sort streams by priority (highest first) - complete fullpacks before partials before singles
+        streams = sorted(streams, key=lambda x: -x['priority'])
+
+        created = 0
+        seasons_with_complete_fullpack = set()
+        seasons_episode_count = {}  # Track total episodes created per season
+
+        # Get expected episode counts per season from TMDB
+        tmdb_season_eps = {}
+        details = self._fetch_show_details(tmdb_id)
+        if details:
+            for sd in details.get('seasons', []):
+                sn = sd.get('season_number', 0)
+                ec = sd.get('episode_count', 0)
+                if sn > 0 and ec > 0:
+                    tmdb_season_eps[sn] = ec
+
+        # Process fullpacks first (now properly sorted by priority)
+        for stream in streams:
+            if not stream['is_fullpack']:
+                continue
+
+            season = stream['season']
+            # Skip if already complete with good quality
+            if season in skipped_seasons:
+                continue
+            # Skip if we already have enough episodes for this season
+            if season in seasons_with_complete_fullpack:
+                continue
+
+            count = self._process_fullpack(show_name, stream, first_air_date)
+            if count > 0:
+                created += count
+                seasons_episode_count[season] = seasons_episode_count.get(season, 0) + count
+                # Mark season complete when we have all episodes (from TMDB) or fallback 80%
+                expected = tmdb_season_eps.get(season, 0)
+                total = seasons_episode_count[season]
+                if expected > 0 and total >= expected:
+                    seasons_with_complete_fullpack.add(season)
+                elif not stream.get('is_partial_pack', False) and expected == 0 and count >= 5:
+                    # Fallback if TMDB has no data for this season
+                    seasons_with_complete_fullpack.add(season)
+
+        # Process singles for seasons without fullpacks
+        singles_limit = 15  # Max singles per show to prevent overload
+        singles_processed = 0
+
+        for stream in streams:
+            if stream['is_fullpack']:
+                continue
+            if singles_processed >= singles_limit:
+                break
+
+            season = stream['season']
+            # Skip if already complete with good quality
+            if season in skipped_seasons:
+                continue
+            if season in seasons_with_complete_fullpack:
+                continue
+
+            count = self._process_single(show_name, stream, first_air_date)
+            created += count
+            singles_processed += 1
+
+        if created > 0:
+            self._stats['shows'] += 1
+            # Save registry incrementally after each show with new episodes
+            self._save_registry()
+
+        return created
+
+    # ===== CLEANUP =====
+
+    def cleanup_orphaned_files(self):
+        """Remove .mkv files not in registry"""
+        if not os.path.exists(self.TV_DIR):
+            return
+
+        removed = 0
+        registry_paths = {v['file_path'] for v in self._registry.values()}
+
+        for root, dirs, files in os.walk(self.TV_DIR):
+            for f in files:
+                if not f.endswith('.mkv'):
+                    continue
+
+                filepath = os.path.join(root, f)
+                if filepath not in registry_paths:
+                    try:
+                        os.remove(filepath)
+                        self.log("INFO", f"Removed orphaned: {f}")
+                        removed += 1
+                    except OSError as e:
+                        self.log("WARN", f"Failed to remove {f}: {e}")
+
+        # Remove empty directories
+        for root, dirs, files in os.walk(self.TV_DIR, topdown=False):
+            for d in dirs:
+                dirpath = os.path.join(root, d)
+                try:
+                    if not os.listdir(dirpath):
+                        os.rmdir(dirpath)
+                except OSError:
+                    pass
+
+        if removed:
+            self.log("INFO", f"Cleanup complete: removed {removed} orphaned files")
+
+    def cleanup_orphaned_torrents(self):
+        """Remove torrents not referenced by any .mkv file"""
+        torrents = self._ts_list_torrents()
+        if not torrents:
+            return
+
+        # Get all hashes from registry
+        registry_hashes = {v['hash'].lower() for v in self._registry.values()}
+
+        removed = 0
+        for t in torrents:
+            h = (t.get('hash') or '').lower()
+            if not h:
+                continue
+
+            # Check if TV torrent (has series pattern in title)
+            title = t.get('title', '').lower()
+            if not re.search(r's\d+e\d+|season|episode', title):
+                continue  # Skip non-TV torrents
+
+            if h not in registry_hashes:
+                if not self._is_hash_on_disk(h):
+                    if self._ts_remove_torrent(h):
+                        removed += 1
+                        self.log("INFO", f"Removed orphaned torrent: {h[:8]}...")
+                else:
+                    self.log("DEBUG", f"Torrent {h[:8]} not in registry but found on disk, keeping")
+
+        if removed:
+            self.log("INFO", f"Removed {removed} orphaned torrents")
+
+    def rehydrate_missing_torrents(self):
+        """
+        Re-add torrents for .mkv files where torrent is no longer active.
+        Reads magnet URL from third line of .mkv file and re-adds with fresh trackers.
+        """
+        # Get active torrent hashes
+        torrents = self._ts_list_torrents()
+        active_hashes = {(t.get('hash') or '').lower() for t in torrents if t.get('hash')}
+
+        rehydrated = 0
+        MAX_REHYDRATE_PER_RUN = 20  # Limit to prevent GoStorm saturation
+
+        if not os.path.exists(self.TV_DIR):
+            return
+
+        self.log("INFO", "Scanning for missing torrents to rehydrate...")
+
+        for root, _, files in os.walk(self.TV_DIR):
+            if rehydrated >= MAX_REHYDRATE_PER_RUN:
+                self.log("INFO", f"Reached limit of {MAX_REHYDRATE_PER_RUN} rehydrations, stopping scan.")
+                break
+
+            for filename in files:
+                if not filename.lower().endswith('.mkv'):
+                    continue
+
+                if rehydrated >= MAX_REHYDRATE_PER_RUN:
+                    break
+
+                filepath = os.path.join(root, filename)
+                try:
+                    with open(filepath, 'r') as f:
+                        lines = f.readlines()
+
+                    if len(lines) < 3:
+                        continue
+
+                    stream_line = lines[0].strip()
+                    magnet_line = lines[2].strip()
+
+                    # Extract hash from stream URL
+                    hash_match = re.search(r'link=([a-f0-9]{40})', stream_line, re.IGNORECASE)
+                    if not hash_match:
+                        continue
+
+                    hash_val = hash_match.group(1).lower()
+
+                    # Skip if torrent already active
+                    if hash_val in active_hashes:
+                        continue
+
+                    # Rehydrate with fresh magnet (new trackers)
+                    if magnet_line.startswith('magnet:?'):
+                        self.log("INFO", f"Rehydrating ({rehydrated+1}/{MAX_REHYDRATE_PER_RUN}): {filename}...")
+                        # Rebuild magnet with dynamic trackers
+                        fresh_magnet = self._build_magnet(hash_val)
+                        if self._ts_add_torrent(fresh_magnet, filename):
+                            rehydrated += 1
+                            active_hashes.add(hash_val)  # Prevent duplicate adds
+                            # CRITICAL: Sleep between adds to let GoStorm resolve DHT/Metadata
+                            time.sleep(5) 
+
+                except Exception as e:
+                    self.log("DEBUG", f"Error reading {filename}: {e}")
+                    continue
+
+        if rehydrated > 0:
+            self.log("INFO", f"Rehydrated {rehydrated} missing torrents")
+        else:
+            self.log("DEBUG", "No torrents needed rehydration")
+
+    # ===== INSTANCE MANAGEMENT =====
+
+    def _kill_existing_instances(self):
+        """
+        Ensure single instance using atomic file locking (fcntl.flock).
+        This is the standard Unix approach - no race conditions possible.
+        """
+        import fcntl
+        import atexit
+
+        lock_file = "/tmp/gostorm-tv-sync.lock"
+        pid_file = "/tmp/gostorm-tv-sync.pid"
+
+        # Open lock file (create if not exists)
+        try:
+            self._lock_fd = open(lock_file, 'w')
+        except IOError as e:
+            self.log("ERROR", f"Cannot create lock file: {e}")
+            sys.exit(1)
+
+        # Try to acquire EXCLUSIVE lock (non-blocking)
+        try:
+            fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except IOError:
+            # Lock held by another process - check if it's alive
+            try:
+                with open(pid_file, 'r') as f:
+                    old_pid = int(f.read().strip())
+                os.kill(old_pid, 0)  # Check if process exists
+                self.log("ERROR", f"Another instance already running (PID {old_pid}). Exiting.")
+                self._lock_fd.close()
+                sys.exit(1)
+            except (ProcessLookupError, ValueError, FileNotFoundError, PermissionError):
+                # Stale lock - old process crashed
+                self.log("WARN", "Stale lock detected, forcing acquisition...")
+                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX)
+
+        # Write our PID
+        try:
+            with open(pid_file, 'w') as f:
+                f.write(str(os.getpid()))
+        except IOError:
+            pass
+
+        self.log("INFO", f"Lock acquired, running as PID {os.getpid()}")
+        atexit.register(self._release_lock)
+
+    def _release_lock(self):
+        """Release lock file on exit."""
+        import fcntl
+
+        lock_file = "/tmp/gostorm-tv-sync.lock"
+        pid_file = "/tmp/gostorm-tv-sync.pid"
+
+        try:
+            if hasattr(self, '_lock_fd') and self._lock_fd:
+                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
+                self._lock_fd.close()
+                self._lock_fd = None
+        except:
+            pass
+
+        try:
+            os.remove(pid_file)
+            os.remove(lock_file)
+        except:
+            pass
+
+    # ===== MAIN EXECUTION =====
+
+    def run(self, max_shows: int = 0) -> bool:
+        """
+        Main execution: discover shows, process, cleanup
+        max_shows: limit processing (0 = unlimited)
+        """
+        # Ensure single instance
+        self._kill_existing_instances()
+
+        start_time = time.time()
+        self.log("INFO", "=" * 60)
+        self.log("INFO", "GoStorm TV Sync - Starting")
+        self.log("INFO", f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.log("INFO", "=" * 60)
+
+        try:
+            # Protect existing files from cleanup (for shows now filtered by age/genre)
+            self._populate_registry_from_existing()
+
+            # Discover shows
+            shows = self.discover_shows()
+            if not shows:
+                self.log("WARN", "No shows discovered")
+                return False
+
+            # Limit if requested
+            if max_shows > 0:
+                shows = shows[:max_shows]
+                self.log("INFO", f"Limited to {max_shows} shows")
+
+            # Process each show
+            for i, show in enumerate(shows, 1):
+                # Check for graceful shutdown request
+                if _shutdown_requested:
+                    self.log("INFO", "Shutdown requested, saving registry and exiting...")
+                    self._save_registry()
+                    self.log("INFO", f"Registry saved with {len(self._registry)} episodes")
+                    return True
+
+                name = show.get('name') or show.get('original_name', '')
+                self.log("INFO", f"[{i}/{len(shows)}] {name}")
+                self.process_show(show)
+
+            # Save registry
+            self._save_registry()
+            self.log("INFO", "Registry saved")
+
+            # Cleanup
+            self.log("INFO", "Running cleanup...")
+            self.cleanup_orphaned_files()
+            self.cleanup_orphaned_torrents()
+
+            # Rehydrate missing torrents (re-add from saved magnets)
+            self.log("INFO", "Checking for torrents to rehydrate...")
+            self.rehydrate_missing_torrents()
+
+            # Stats
+            elapsed = time.time() - start_time
+            self.log("INFO", "=" * 60)
+            self.log("INFO", "Sync Complete!")
+            self.log("INFO", f"Shows processed: {self._stats['shows']}")
+            self.log("INFO", f"Episodes created: {self._stats['episodes_created']}")
+            self.log("INFO", f"Episodes skipped: {self._stats['episodes_skipped']}")
+            self.log("INFO", f"Upgrades: {self._stats['upgrades']}")
+            self.log("INFO", f"Registry size: {len(self._registry)} episodes")
+            self.log("INFO", f"Duration: {elapsed:.1f}s")
+            self.log("INFO", "=" * 60)
+
+            # Trigger Plex refresh for TV library
+            tv_lib_id = _cfg.get('plex', {}).get('tv_library_id', 0)
+            if tv_lib_id:
+                self.notify_plex(tv_lib_id)
+
+            return True
+
+        except Exception as e:
+            self.log("ERROR", f"Fatal error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+def main():
+    """Entry point"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='GoStorm TV Sync')
+    parser.add_argument('--max-shows', type=int, default=0,
+                        help='Limit number of shows to process (0=unlimited)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Show what would be done without making changes')
+    args = parser.parse_args()
+
+    if args.dry_run:
+        print("Dry-run mode not yet implemented")
+        return 1
+
+    sync = GoStormTV()
+    success = sync.run(max_shows=args.max_shows)
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
