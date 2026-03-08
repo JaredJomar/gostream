@@ -19,6 +19,8 @@ var (
 	shieldActive atomic.Bool
 	// isWatchdogRunning prevents multiple goroutine spawns.
 	isWatchdogRunning atomic.Bool
+	// staticCorruptionCount tracks consecutive corrupted pieces for delayed activation.
+	staticCorruptionCount atomic.Int32
 )
 
 // IsResponsive returns the effective state of ResponsiveMode,
@@ -34,6 +36,7 @@ func IsResponsive() bool {
 func ResetShield() {
 	shieldActive.Store(false)
 	isWatchdogRunning.Store(false)
+	staticCorruptionCount.Store(0)
 }
 
 type Piece struct {
@@ -92,10 +95,17 @@ func (p *Piece) MarkNotComplete() error {
 	now := time.Now().Unix()
 	lastCorruptionUnix.Store(now)
 
-	// Activate shield if user settings allowed responsive mode but it's now dirty.
+	// V305: Delayed STRICT Activation to prevent micro-stutters.
+	// First corruption event bans the peer (engine level) but keeps FAST mode.
+	// Consecutive or rapid corruption forces STRICT mode.
 	if settings.GetAdaptiveShield() && settings.GetResponsiveMode() && !shieldActive.Load() {
-		log.TLogln("[AdaptiveShield] Corruption detected for piece", p.Id, "- Force STRICT mode (Shield: ACTIVE)")
-		shieldActive.Store(true)
+		count := staticCorruptionCount.Add(1)
+		if count > 1 {
+			log.TLogln("[AdaptiveShield] Persistent corruption - Force STRICT mode (Shield: ACTIVE)")
+			shieldActive.Store(true)
+		} else {
+			log.TLogln("[AdaptiveShield] Single corruption detected for piece", p.Id, "- FAST mode preserved, monitoring...")
+		}
 	}
 
 	// Start watchdog only once
@@ -108,8 +118,9 @@ func (p *Piece) MarkNotComplete() error {
 
 				if elapsed > 30*time.Second {
 					if shieldActive.Swap(false) {
-						log.TLogln("[AdaptiveShield] Clean streak detected (60s) - Restoring FAST mode (Shield: OFF)")
+						log.TLogln("[AdaptiveShield] Clean streak detected (30s) - Restoring FAST mode (Shield: OFF)")
 					}
+					staticCorruptionCount.Store(0)
 					isWatchdogRunning.Store(false)
 					return
 				}
