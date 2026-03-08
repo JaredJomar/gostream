@@ -15,8 +15,8 @@ class ProwlarrClient:
         # Configuration - Set to True to use Prowlarr, False to use Torrentio only
         self.ENABLED = True
         
-        self.API_KEY = "80b0e137663b4523bae737ec8f5fc791"
-        self.BASE_URL = "http://192.168.1.250:9696"
+        self.API_KEY = "<YOUR-API-KEY>"
+        self.BASE_URL = "http://<YOUR-IP>:9696"
         self.SEARCH_ENDPOINT = f"{self.BASE_URL}/api/v1/search"
         self.session = requests.Session()
         self.session.headers.update({
