@@ -255,10 +255,10 @@ The engine is content-agnostic; torrents can be added manually via API. The incl
 
 | Script | Trigger | What it does |
 |--------|---------|-------------|
-| `gostorm-sync-complete.py` | Daily cron | TMDB Discover + Popular → Torrentio → GoStorm → virtual `.mkv` |
-| `gostorm-tv-sync.py` | Weekly cron | TV series with fullpack-first approach |
-| `plex-watchlist-sync.py` | Hourly cron | Plex cloud watchlist → IMDB → Torrentio → GoStorm |
-| `health-monitor.py` | Persistent service | Real-time dashboard at `:8095` |
+| `gostorm-sync-complete.py` | Scheduler / manual | TMDB Discover + Popular → Torrentio → GoStorm → virtual `.mkv` |
+| `gostorm-tv-sync.py` | Scheduler / manual | TV series with fullpack-first approach |
+| `plex-watchlist-sync.py` | Scheduler / manual | Plex cloud watchlist → IMDB → Torrentio → GoStorm |
+| `health-monitor.py` | Persistent service | Real-time dashboard at `:8095`, runs the built-in scheduler |
 
 **Quality ladder**: `4K DV > 4K HDR10+ > 4K HDR > 4K > 1080p REMUX > 1080p`\
 **Minimum seeders**: 20 (main sync), 10 (watchlist sync, for older films)
@@ -356,7 +356,7 @@ The interactive installer handles everything end-to-end:
 5. Creates `GoStream/STATE/`, `logs/`, and FUSE mount point directories
 6. **Compiles the GoStream binary** (downloads Go if needed, detects architecture automatically)
 7. Writes and enables systemd services for `gostream` and `health-monitor`
-8. Optionally configures cron jobs for sync scripts
+8. Optionally configures system cron jobs (skip if using the built-in Scheduler)
 
 Once complete:
 
@@ -456,7 +456,7 @@ The pump goroutine survives `ErrInterrupted` — it sleeps 200 ms and continues 
 <details>
 <summary><b>Step 6 — Add from Your Plex Watchlist</b></summary>
 
-Add any movie to your Plex cloud watchlist (desktop or mobile app). Within one hour (hourly cron):
+Add any movie to your Plex cloud watchlist (desktop or mobile app). Within the interval configured in the Scheduler (default: 1 hour):
 
 ```bash
 python3 /home/pi/GoStream/scripts/plex-watchlist-sync.py
@@ -500,24 +500,21 @@ curl -s -X POST -H 'Content-Type: application/json' \
 </details>
 
 <details>
-<summary><b>Step 8 — Set Up Cron Jobs</b></summary>
+<summary><b>Step 8 — Configure the MKV Creation Scheduler</b></summary>
 
-```bash
-crontab -e
-```
+GoStream includes a built-in scheduler that replaces system cron. Configure it from the Control Panel at `:8096/control` → **Sync Scheduler** card.
 
-Add:
+**Three jobs are available:**
 
-```cron
-# Plex Watchlist sync every hour
-0 * * * * /usr/bin/python3 /home/pi/GoStream/scripts/plex-watchlist-sync.py >> /home/pi/logs/watchlist-sync.log 2>&1
+| Job | Default schedule | Log file |
+|-----|-----------------|----------|
+| Movies Library Sync | Mon + Thu at 03:00 | `logs/gostorm-debug.log` |
+| TV Series Library Sync | Wed + Fri at 04:00 | `logs/gostorm-tv-sync.log` |
+| Plex Watchlist Sync | Every 1 hour | `logs/watchlist-sync.log` |
 
-# Full movie sync daily at 3 AM
-0 3 * * * /usr/bin/python3 /home/pi/GoStream/scripts/gostorm-sync-complete.py >> /home/pi/logs/gostorm-debug.log 2>&1
+Enable the scheduler with the **Enable Scheduler** toggle, pick weekdays and start time for each job, then click **Save schedule**. The `health-monitor` service picks up the new schedule within 1 minute — no restart needed.
 
-# TV sync every Sunday at 4 AM
-0 4 * * 0 /usr/bin/python3 /home/pi/GoStream/scripts/gostorm-tv-sync.py >> /home/pi/logs/gostorm-tv-sync.log 2>&1
-```
+> **Advanced / fallback**: if you prefer system cron, `install.sh` offers an optional cron setup step. Disable the built-in scheduler to avoid double-firing.
 
 </details>
 
@@ -662,6 +659,15 @@ Two panels for manual sync execution without SSH:
 - **MOVIES SYNC** — Triggers `gostorm-sync-complete.py` with live SSE log streaming
 - **TV SYNC** — Triggers `gostorm-tv-sync.py` with Start/Idle status
 
+### MKV Creation Scheduler
+
+Replaces system cron. Configured from the **Sync Scheduler** card in the Control Panel:
+- **Movies Library Sync** — select weekdays + start time; fires `gostorm-sync-complete.py`
+- **TV Series Library Sync** — select weekdays + start time; fires `gostorm-tv-sync.py`
+- **Plex Watchlist Sync** — interval-based (1 h, 2 h … 24 h); fires `plex-watchlist-sync.py`
+
+The `health-monitor` service runs the scheduler loop (checks every 60 s). Last/next run times and live status are shown in the card. State persists across restarts in `STATE/scheduler_state.json`.
+
 ---
 
 ## Configuration Reference
@@ -714,7 +720,7 @@ Environment="GOGC=100"
 
 All scripts in `scripts/` resolve `config.json` from the parent directory automatically. Override with `MKV_PROXY_CONFIG_PATH`.
 
-### `gostorm-sync-complete.py` Daily Movie Sync
+### `gostorm-sync-complete.py` Movie Sync
 
 Queries TMDB Discover + Popular (Italian + English, region IT+US), evaluates Torrentio results, adds the best torrent.
 
@@ -726,7 +732,7 @@ python3 scripts/gostorm-sync-complete.py
 - Min seeders: 20 · Min size: 10 GB (4K), 3 GB (1080p)
 - Skips existing films (by TMDB ID) · Upgrades lower-quality entries
 
-### `gostorm-tv-sync.py` Weekly TV Sync
+### `gostorm-tv-sync.py` TV Sync
 
 ```bash
 python3 scripts/gostorm-tv-sync.py
@@ -740,7 +746,7 @@ Show Name/
     Show.Name_S01E02_<hash>.mkv
 ```
 
-### `plex-watchlist-sync.py` Hourly Watchlist Sync
+### `plex-watchlist-sync.py` Watchlist Sync
 
 ```bash
 python3 scripts/plex-watchlist-sync.py [--dry-run] [--verbose]
