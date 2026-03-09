@@ -13,6 +13,7 @@ import re
 import sys
 import time
 import requests
+import urllib3
 from prowlarr_client import ProwlarrClient
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -40,12 +41,30 @@ def _load_gostream_config() -> dict:
     # GoStream/config.json → GoStream dir is the base dir for STATE
     # logs stay at parent level (shared with gostream binary and health-monitor)
     config_dir = os.path.dirname(os.path.abspath(config_path))
-    cfg.setdefault('_state_dir', os.path.join(config_dir, 'STATE'))
-    cfg.setdefault('_log_dir', os.path.join(config_dir, 'logs'))
+    cfg['_state_dir'] = os.environ.get('GOSTREAM_STATE_DIR', os.path.join(config_dir, 'STATE'))
+    cfg['_log_dir'] = os.environ.get('GOSTREAM_LOG_DIR', os.path.join(config_dir, 'logs'))
+    plex_cfg = cfg.setdefault('plex', {})
+    plex_cfg['url'] = os.environ.get('GOSTREAM_PLEX_URL') or os.environ.get('PLEX_URL') or plex_cfg.get('url', '')
+    plex_cfg['token'] = os.environ.get('GOSTREAM_PLEX_TOKEN') or os.environ.get('PLEX_TOKEN') or plex_cfg.get('token', '')
     return cfg
 
 
 _cfg = _load_gostream_config()
+
+
+def _env_truthy(value: object) -> bool:
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _normalize_plex_url(url: str) -> str:
+    if PLEX_INSECURE_TLS and url.startswith('http://') and ':32400' in url:
+        return 'https://' + url[len('http://'):]
+    return url
+
+
+PLEX_INSECURE_TLS = _env_truthy(os.environ.get('GOSTREAM_PLEX_INSECURE_TLS') or os.environ.get('PLEX_INSECURE_TLS'))
+if PLEX_INSECURE_TLS:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class GoStormSync:
@@ -2421,13 +2440,13 @@ class GoStormSync:
 
     def notify_plex(self, section_id: int):
         """Send a refresh command to Plex for a specific library section."""
-        PLEX_URL = _cfg.get('plex', {}).get('url', 'http://127.0.0.1:32400')
-        PLEX_TOKEN = _cfg.get('plex', {}).get('token', '')
+        plex_url = _normalize_plex_url(_cfg.get('plex', {}).get('url', 'http://127.0.0.1:32400'))
+        plex_token = _cfg.get('plex', {}).get('token', '')
 
         try:
-            url = f"{PLEX_URL}/library/sections/{section_id}/refresh?X-Plex-Token={PLEX_TOKEN}"
+            url = f"{plex_url}/library/sections/{section_id}/refresh?X-Plex-Token={plex_token}"
             self.log("INFO", f"🚀 Notifying Plex to refresh library section {section_id}...")
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=10, verify=not PLEX_INSECURE_TLS)
             if resp.status_code in (200, 201):
                 self.log_success(f"Plex refresh triggered successfully for section {section_id}")
             else:

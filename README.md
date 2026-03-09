@@ -856,6 +856,7 @@ docker run -d \
   -v /mnt/gostream-mkv-real:/mnt/gostream-mkv-real \
   -v /mnt/gostream-mkv-virtual:/mnt/gostream-mkv-virtual \
   -p 8090:8090 \
+  -p 8095:8095 \
   -p 8096:8096 \
   gostream
 ```

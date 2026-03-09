@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import psutil
 import requests
+import urllib3
 from fastapi import FastAPI, Query, Request, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -42,20 +43,44 @@ def _load_gostream_config() -> dict:
     except Exception:
         cfg = {}
     config_dir = os.path.dirname(os.path.abspath(config_path))
-    cfg.setdefault('_state_dir', os.path.join(config_dir, 'STATE'))
-    cfg.setdefault('_log_dir', os.path.join(config_dir, 'logs'))
+    cfg['_state_dir'] = os.environ.get('GOSTREAM_STATE_DIR', os.path.join(config_dir, 'STATE'))
+    cfg['_log_dir'] = os.environ.get('GOSTREAM_LOG_DIR', os.path.join(config_dir, 'logs'))
+    plex_cfg = cfg.setdefault('plex', {})
+    plex_cfg['url'] = os.environ.get('GOSTREAM_PLEX_URL') or os.environ.get('PLEX_URL') or plex_cfg.get('url', '')
+    plex_cfg['token'] = os.environ.get('GOSTREAM_PLEX_TOKEN') or os.environ.get('PLEX_TOKEN') or plex_cfg.get('token', '')
     return cfg
 
 
 _cfg = _load_gostream_config()
 _scripts_dir = os.path.dirname(os.path.abspath(__file__))
 
+
+def _env_truthy(value: object) -> bool:
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _normalize_plex_url(url: str, insecure_tls: bool) -> str:
+    if insecure_tls and url.startswith('http://') and ':32400' in url:
+        return 'https://' + url[len('http://'):]
+    return url
+
+
 # Configuration
 GOSTORM_URL = _cfg.get('gostorm_url', 'http://127.0.0.1:8090')
 PRELOAD_SIZE_MB = 128  # MB to preload
 FUSE_METRICS_URL = f"http://127.0.0.1:{_cfg.get('metrics_port', 8096)}/metrics"
-PLEX_URL     = _cfg.get('plex', {}).get('url', 'http://127.0.0.1:32400')
-PLEX_TOKEN   = _cfg.get('plex', {}).get('token', '')
+PLEX_URL = _cfg.get('plex', {}).get('url', 'http://127.0.0.1:32400')
+PLEX_TOKEN = _cfg.get('plex', {}).get('token', '')
+PLEX_INSECURE_TLS = _env_truthy(os.environ.get('GOSTREAM_PLEX_INSECURE_TLS') or os.environ.get('PLEX_INSECURE_TLS'))
+PLEX_URL = _normalize_plex_url(PLEX_URL, PLEX_INSECURE_TLS)
+if PLEX_INSECURE_TLS:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def plex_get(url: str, **kwargs):
+    kwargs.setdefault('verify', not PLEX_INSECURE_TLS)
+    return requests.get(url, **kwargs)
+
 FUSE_MOUNT = _cfg.get('fuse_mount_path', '/mnt/torrserver-go')
 MOVIES_DIR = os.path.join(_cfg.get('physical_source_path', '/mnt/torrserver'), 'movies')
 TV_DIR = os.path.join(_cfg.get('physical_source_path', '/mnt/torrserver'), 'tv')
@@ -81,7 +106,7 @@ RESTART_COOLDOWN = 30  # seconds between restarts
 SPEED_HISTORY_SIZE = 180  # 15 minutes of data at 5s intervals
 ACTIVE_STICKY_SECONDS = 120  # keep torrent "active" for 15s after speed drops
 
-PORT = 8095
+PORT = int(os.getenv("HEALTH_MONITOR_PORT", "8095"))
 
 # Logging setup
 logging.basicConfig(
@@ -259,7 +284,7 @@ def get_plex_session_info() -> Dict[str, Dict[str, Any]]:
 
     try:
         url = f"{PLEX_URL}/status/sessions?X-Plex-Token={PLEX_TOKEN}"
-        response = requests.get(url, timeout=10)
+        response = plex_get(url, timeout=10)
         if response.status_code != 200:
             return plex_audio_cache
 
@@ -407,7 +432,7 @@ def search_plex_by_filename(filename: str) -> Optional[Dict[str, Any]]:
     """Search Plex library for a specific filename to get metadata (V238: TV Support)."""
     try:
         url = f"{PLEX_URL}/library/sections/all/search?filename={filename}&X-Plex-Token={PLEX_TOKEN}"
-        response = requests.get(url, timeout=5)
+        response = plex_get(url, timeout=5)
         if response.status_code == 200:
             import xml.etree.ElementTree as ET
             root = ET.fromstring(response.text)
@@ -458,7 +483,7 @@ def search_plex_by_filename(filename: str) -> Optional[Dict[str, Any]]:
     try:
         # V238: Removed type=1 to allow searching both movies and episodes
         url = f"{PLEX_URL}/library/sections/all/search?filename={filename}&X-Plex-Token={PLEX_TOKEN}"
-        response = requests.get(url, timeout=5)
+        response = plex_get(url, timeout=5)
         if response.status_code == 200:
             import xml.etree.ElementTree as ET
             root = ET.fromstring(response.text)
@@ -1000,7 +1025,7 @@ def check_natpmp() -> None:
 def check_plex() -> None:
     """Check Plex server status."""
     try:
-        response = requests.get(f"{PLEX_URL}/identity", timeout=5)
+        response = plex_get(f"{PLEX_URL}/identity", timeout=5)
         if response.status_code == 200:
             # Parse XML to extract version from MediaContainer
             version_match = re.search(r'MediaContainer.*?version="([^"]+)"', response.text)

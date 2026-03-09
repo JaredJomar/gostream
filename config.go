@@ -71,11 +71,11 @@ type Config struct {
 	MaxCacheEntries         int `json:"max_cache_entries"`
 
 	// --- Connectivity ---
-	GoStormBaseURL string `json:"gostorm_url"`
-	ProxyListenPort   int    `json:"proxy_listen_port"`
-	MetricsPort       int    `json:"metrics_port"`
-	BlockListURL      string `json:"blocklist_url"`
-	AIURL             string `json:"ai_url"` // V1.4.5: AI Optimizer sidecar URL
+	GoStormBaseURL  string `json:"gostorm_url"`
+	ProxyListenPort int    `json:"proxy_listen_port"`
+	MetricsPort     int    `json:"metrics_port"`
+	BlockListURL    string `json:"blocklist_url"`
+	AIURL           string `json:"ai_url"` // V1.4.5: AI Optimizer sidecar URL
 
 	// --- FUSE Paths ---
 	// Fallback when CLI args are omitted. CLI args always take precedence.
@@ -109,8 +109,8 @@ type Config struct {
 	ReadBufferSize          int           `json:"-"`
 
 	// --- Disk Warmup ---
-	DiskWarmupQuotaGB  int64 `json:"disk_warmup_quota_gb"`   // Total SSD quota for warmup cache (default: 32)
-	WarmupHeadSizeMB   int64 `json:"warmup_head_size_mb"`    // Per-file head warmup cap in MB (default: 64)
+	DiskWarmupQuotaGB int64 `json:"disk_warmup_quota_gb"` // Total SSD quota for warmup cache (default: 32)
+	WarmupHeadSizeMB  int64 `json:"warmup_head_size_mb"`  // Per-file head warmup cap in MB (default: 64)
 
 	// --- NAT-PMP (V228) ---
 	NatPMP NatPMPConfig `json:"natpmp"`
@@ -168,16 +168,16 @@ func LoadConfig() Config {
 		WarmupHeadSizeMB:        64,
 
 		Scheduler: SchedulerConfig{
-			Enabled:    false, // off by default — won't break installs using cron
-			MoviesSync: DailyJobConfig{Enabled: true, DaysOfWeek: []int{1, 4}, Hour: 3, Minute: 0},
-			TVSync:     DailyJobConfig{Enabled: true, DaysOfWeek: []int{3, 5}, Hour: 4, Minute: 0},
+			Enabled:       false, // off by default — won't break installs using cron
+			MoviesSync:    DailyJobConfig{Enabled: true, DaysOfWeek: []int{1, 4}, Hour: 3, Minute: 0},
+			TVSync:        DailyJobConfig{Enabled: true, DaysOfWeek: []int{3, 5}, Hour: 4, Minute: 0},
 			WatchlistSync: WatchlistSyncConfig{Enabled: true, IntervalHours: 1},
 		},
 
-		GoStormBaseURL: "http://127.0.0.1:8090",
-		AIURL:          "http://127.0.0.1:8085", // Default Pi internal AI port (V1.4.5)
-		ProxyListenPort:   8080,
-		MetricsPort:       8096,
+		GoStormBaseURL:  "http://127.0.0.1:8090",
+		AIURL:           "http://127.0.0.1:8085", // Default Pi internal AI port (V1.4.5)
+		ProxyListenPort: 8080,
+		MetricsPort:     8096,
 
 		// Legacy Fixed Defaults
 		DefaultFileSize:         30 * 1024 * 1024 * 1024,
@@ -282,6 +282,12 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("MKV_PROXY_AI_URL"); v != "" {
 		c.AIURL = v
 	}
+	if v := firstEnv("GOSTREAM_PLEX_URL", "PLEX_URL"); v != "" {
+		c.Plex.URL = v
+	}
+	if v := firstEnv("GOSTREAM_PLEX_TOKEN", "PLEX_TOKEN"); v != "" {
+		c.Plex.Token = v
+	}
 	if v := os.Getenv("MKV_PROXY_LOG_LEVEL"); v != "" {
 		c.LogLevel = v
 	}
@@ -295,6 +301,15 @@ func (c *Config) applyEnvOverrides() {
 			c.GID = uint32(n)
 		}
 	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (c *Config) finalize() {
