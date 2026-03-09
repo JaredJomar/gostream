@@ -108,9 +108,9 @@ func (p *Piece) MarkNotComplete() error {
 		}
 	}
 
-	// Start watchdog on first corruption (count>=1) to clear pending state if no follow-up arrives.
-	// Previously gated on shieldActive, which left count=1 dangling indefinitely.
-	if count >= 1 && !isWatchdogRunning.Swap(true) {
+	// Start watchdog on first corruption to clear pending state if no follow-up arrives.
+	// Previously gated on shieldActive, which left staticCorruptionCount=1 dangling indefinitely.
+	if staticCorruptionCount.Load() >= 1 && !isWatchdogRunning.Swap(true) {
 		go func() {
 			for {
 				time.Sleep(1 * time.Second)
