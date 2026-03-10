@@ -435,6 +435,7 @@ func (t *Torrent) StatHighFreq() *state.TorrentStatus {
 		tst := t.Torrent.Stats()
 		st.TotalPeers = tst.TotalPeers
 		st.ActivePeers = tst.ActivePeers
+		st.ConnectedSeeders = tst.ConnectedSeeders
 		st.LoadedSize = t.Torrent.BytesCompleted()
 	}
 

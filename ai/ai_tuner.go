@@ -35,6 +35,10 @@ var cpuUsageAvg []float64
 var cycleCounter int
 var pulseCounter int
 var peakCPUCycle float64
+var prevBuffer int
+
+const normalCycle = 60 // 300s
+const crisisCycle = 12 // 60s
 
 // Keep-Alive client for llama.cpp local
 var aiClient = &http.Client{
@@ -64,6 +68,10 @@ func (t *AITweak) Sanitize() {
 	if t.PeerTimeout > 60 {
 		t.PeerTimeout = 60
 	}
+}
+
+func crisisActive() bool {
+	return getAverage(torrentSpeedAvg) < 3.0 && len(torrentSpeedAvg) > 10
 }
 
 func getAverage(samples []float64) float64 {
@@ -135,24 +143,36 @@ func runTuningCycle(aiURL string) {
 
 	// Multi-stream protection logic
 	if count > 1 {
-		if lastConns != defaultConns || lastTimeout != defaultTimeout {
-			log.Printf("[AI-Pilot] Multiple streams detected (%d). Resetting to safety defaults (%d:%d).", count, defaultConns, defaultTimeout)
-			for _, t := range activeTorrents {
-				if t.Torrent != nil {
-					t.Torrent.SetMaxEstablishedConns(defaultConns)
-					t.AddExpiredTime(time.Duration(defaultTimeout) * time.Second)
-				}
+		// Check if exactly one priority stream exists (others are Plex scan noise)
+		var priorityList []*torr.Torrent
+		for _, t := range activeTorrents {
+			if t.IsPriority {
+				priorityList = append(priorityList, t)
 			}
-			atomic.StoreInt32(&CurrentLimit, int32(defaultConns))
-			lastConns = defaultConns
-			lastTimeout = defaultTimeout
-			metricsHistory = nil
-			torrentSpeedAvg = nil
-			cpuUsageAvg = nil
-			cycleCounter = 0
-			peakCPUCycle = 0
 		}
-		return
+		if len(priorityList) == 1 {
+			activeTorrents = priorityList
+		} else {
+			// Multiple real streams or no priority → safety reset
+			if lastConns != defaultConns || lastTimeout != defaultTimeout {
+				log.Printf("[AI-Pilot] Multiple streams detected (%d). Resetting to safety defaults (%d:%d).", count, defaultConns, defaultTimeout)
+				for _, t := range activeTorrents {
+					if t.Torrent != nil {
+						t.Torrent.SetMaxEstablishedConns(defaultConns)
+						t.AddExpiredTime(time.Duration(defaultTimeout) * time.Second)
+					}
+				}
+				atomic.StoreInt32(&CurrentLimit, int32(defaultConns))
+				lastConns = defaultConns
+				lastTimeout = defaultTimeout
+				metricsHistory = nil
+				torrentSpeedAvg = nil
+				cpuUsageAvg = nil
+				cycleCounter = 0
+				peakCPUCycle = 0
+			}
+			return
+		}
 	}
 
 	var activeT *torr.Torrent
@@ -180,10 +200,11 @@ func runTuningCycle(aiURL string) {
 		torrentSpeedAvg = nil
 		cpuUsageAvg = nil
 		cycleCounter = 0
-		lastConns = 0
-		lastTimeout = 0
+		lastConns = defaultConns
+		lastTimeout = defaultTimeout
 		pulseCounter = 0
 		peakCPUCycle = 0
+		prevBuffer = 0
 	}
 	lastActiveHash = currentHash
 
@@ -205,9 +226,13 @@ func runTuningCycle(aiURL string) {
 		cpuUsageAvg = cpuUsageAvg[1:]
 	}
 
-	// AI CYCLE: Every 60 samples (300s / 5m)
+	// AI CYCLE: adaptive — 300s normal, 60s in crisis (avg speed < 1MB/s)
 	cycleCounter++
-	if cycleCounter < 60 {
+	threshold := normalCycle
+	if crisisActive() {
+		threshold = crisisCycle
+	}
+	if cycleCounter < threshold {
 		return
 	}
 	cycleCounter = 0
@@ -234,6 +259,21 @@ func runTuningCycle(aiURL string) {
 		}
 	}
 
+	bufDelta := 0
+	if prevBuffer > 0 {
+		bufDelta = buffer - prevBuffer
+	}
+	prevBuffer = buffer
+
+	playerState := "streaming"
+	if currSpeedMBs == 0 {
+		if bufDelta < -3 {
+			playerState = "consuming"
+		} else {
+			playerState = "paused"
+		}
+	}
+
 	currentSnap := sanitizeStr(fmt.Sprintf("[CPU:%d%% (Peak:%d%%), Buf:%d%%, Peers:%d, Speed:%.1fMB/s (%s)]",
 		int(avgCPU), int(peakCPUCycle), buffer, activeStats.ActivePeers, currSpeedMBs, speedTrendStr))
 
@@ -257,12 +297,15 @@ func runTuningCycle(aiURL string) {
 	peakCPUCycle = 0
 
 	// Qwen3 ChatML template
+	historyPrefix := ""
+	if len(metricsHistory) > 0 {
+		historyPrefix = "history=" + historyStr + " "
+	}
 	prompt := fmt.Sprintf(
-		"<|im_start|>system\nTune BitTorrent for stable 4K streaming. Output JSON: {\"connections_limit\":N,\"peer_timeout_seconds\":M}<|im_end|>\n<|im_start|>user\nspeed=%.0fMB/s cpu=%d%% buf=%d%% peers=%d trend=%s<|im_end|>\n<|im_start|>assistant\n",
-		currSpeedMBs, int(currentCPU), buffer, activeStats.ActivePeers, speedTrendStr,
+		"<|im_start|>system\nTune BitTorrent parms for performace 4K Movie streaming. connections_limit MUST be between 10-60. peer_timeout_seconds MUST be between 10-60. Output JSON: {\"connections_limit\":N,\"peer_timeout_seconds\":M}<|im_end|>\n<|im_start|>user\nactual Peers in Swarm %d - %sspeed=%.0fMB/s cpu=%d%% buf=%d%% peers=%d trend=%s state=%s<|im_end|>\n<|im_start|>assistant\n",
+		activeStats.TotalPeers, historyPrefix, currSpeedMBs, int(currentCPU), buffer, activeStats.ActivePeers, speedTrendStr, playerState,
 	)
 	_ = contextStr
-	_ = historyStr
 	_ = fileSizeGB
 
 	tweak, err := fetchAIJSON[AITweak](aiURL, prompt)

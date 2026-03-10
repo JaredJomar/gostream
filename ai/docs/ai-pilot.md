@@ -33,7 +33,9 @@ The system is designed to be plug-and-play and entirely decoupled:
 ## Core Architecture
 
 1.  **AI Server**: A background service (`ai-server.service`) running `llama.cpp`. It hosts the quantized model and provides a local API on port `8085`. Configured with a context window of **512 tokens** and `Nice=15` (low CPU priority).
-2.  **AI Tuner**: A background goroutine within GoStream that samples system metrics every **5 seconds** and invokes the AI for decision-making every **300 seconds (5 minutes)**. This "High-Fidelity Sampling / Low-Frequency Inference" approach minimizes CPU overhead.
+2.  **AI Tuner**: A background goroutine within GoStream that samples system metrics every **5 seconds** and invokes the AI for decision-making on an adaptive schedule:
+    - **Normal mode**: every 300 seconds (60 samples × 5s)
+    - **Crisis mode**: every 60 seconds (12 samples × 5s) — activated when 5-minute average speed drops below **3.0 MB/s** (~24 Mbps, the minimum bitrate for a typical 4K movie at 20GB/2h)
 
 ## Model
 
@@ -42,8 +44,9 @@ The system is designed to be plug-and-play and entirely decoupled:
 | Model | `Qwen_Qwen3-0.6B-Q4_K_M.gguf` |
 | Context window | 512 tokens (`-c 512`) |
 | Threads | 2 (`-t 2`) |
-| Inference latency (cold) | ~13s on Pi 4 Cortex-A72 |
+| Inference latency (cold) | ~13s on Pi 4 Cortex-A72 (idle system) |
 | Inference latency (warm) | **~1.6–5s** (KV cache active) |
+| Inference latency (under load) | 30–45s (CPU >90%, Pi 4 throttled) |
 | RAM usage | ~545 MB |
 | Prompt template | ChatML (`<\|im_start\|>`) |
 
@@ -70,35 +73,59 @@ Both models produced correct decisions confirmed by bandwidth graphs. Qwen3-0.6B
 The AI acts as a "Pilot" observing trends through a moving average window:
 *   **Context Change Detection**: Automatically detects when a new torrent is played (via InfoHash) and resets all history, averages, and baseline values to ensure decisions are based only on the current film.
 *   **History Management**: Maintains **4 snapshots** of previous metrics (20-minute window) to provide temporal context.
-*   **Baseline from Config**: `connections_limit` and `peer_timeout` baselines are read from `config.json` at startup, not hardcoded.
+*   **Baseline from Config**: `connections_limit` and `peer_timeout` baselines are read from `config.json` at startup, not hardcoded. Context change resets `lastConns`/`lastTimeout` to these defaults (not to zero).
 *   **Surgical Sanitization**: All prompt data is stripped of non-ASCII characters to prevent backend errors.
 *   **KV Cache**: Uses `cache_prompt: true` — the static system message prefix is cached between cycles, reducing latency on successive requests.
 *   **No Anchoring**: Current parameter values are intentionally excluded from the prompt. Providing current values as context causes small models to statistically echo them (anchor effect). The model reasons from metrics alone.
+*   **Player State Signal**: Distinguishes `state=streaming` (download active), `state=consuming` (player consuming buffer with no download), and `state=paused` (no download, stable buffer), based on buffer delta between cycles.
+*   **Multi-Stream Safety**: If more than one torrent is active simultaneously:
+    - If exactly **one torrent has `IsPriority=true`** (active stream), the AI tunes that torrent only — other torrents (e.g., Plex background scans) are ignored.
+    - If zero or multiple priority torrents exist, all torrents are reset to config defaults.
 
 ## Prompt Design
 
-The model receives only live metrics — no current parameter values, no explicit ranges, no examples:
+The prompt includes swarm size, optional history, and player state signal:
 
 ```
-system: Tune BitTorrent for stable 4K streaming.
+system: Tune BitTorrent parms for performace 4K Movie streaming.
+        connections_limit MUST be between 10-60.
+        peer_timeout_seconds MUST be between 10-60.
         Output JSON: {"connections_limit":N,"peer_timeout_seconds":M}
 
-user:   speed=23MB/s cpu=60% buf=99% peers=23 trend=UP (+22.9MB/s)
+user:   actual Peers in Swarm 47 - history=[CPU:60% (Peak:85%), Buf:99%, Peers:22, Speed:21MB/s (STABLE)] -> [CPU:54% (Peak:87%), Buf:100%, Peers:20, Speed:17MB/s (DOWN)] speed=10MB/s cpu=54% buf=100% peers=20 trend=DOWN (-7MB/s) state=streaming
 ```
 
 Key design decisions:
-- **No range hints** (`15-60`) → anchors the model to the lower bound
-- **No examples** → causes the model to repeat them
-- **`peer_timeout_seconds`** as key name → conveys unit semantics without constraining values
+- **`actual Peers in Swarm N`** prefix — provides total swarm size as context for connection headroom reasoning, without anchoring `connections_limit` to that value
+- **History prefix** — up to 4 snapshots of previous cycles (every 5 minutes) give the model trend context: "speed declining for 3 cycles" vs "just dropped"
+- **`state=`** signal — allows the model to distinguish `consuming` (urgent: download not keeping up) from `paused` (not urgent: player stopped)
+- **Both MUST constraints** — required for the model to differentiate `peer_timeout_seconds` across scenarios; without them, timeout was always 10s
+- **No seeders field** — tested and removed: the model pattern-matched seeder count into timeout value (e.g., `seeders=10` → `timeout=10`), adding noise rather than signal
 - **Grammar** `number ::= [1-9] [0-9]?` → limits output to 1–2 digit numbers (1–99)
-- **`Sanitize()`** clamps final values to `[15–60]` as safety net
+- **`Sanitize()`** clamps final values to `[10–60]` as safety net
+
+## Inference Quality Assessment
+
+Based on field testing (Qwen3-0.6B, March 2026): **6–7/10**
+
+**Strengths:**
+- Correctly adapts `peer_timeout` between cycles: crisis → 10s (aggressive churn), recovery → 60s (stabilize working peers). This is non-trivial contextual reasoning.
+- Crisis + consuming state → raises `connections_limit` to seek more peers. Directionally correct.
+- Does not produce absurd outputs (e.g., conns=60 when CPU=90%)
+
+**Weaknesses:**
+- Tends to mirror `active_peers` count in `connections_limit` (e.g., peers=13 → conns=13) rather than reasoning about swarm headroom
+- `peer_timeout` varies between identical scenarios across separate runs — some instability
+- High inference latency under Pi load (30–45s) limits crisis-mode effectiveness
+
+The primary contribution of the AI layer is **adaptive `peer_timeout`**: extending it when speed is recovering to stabilize working connections, shortening it aggressively during peer collapse. `connections_limit` adjustments are more mechanical.
 
 ## Real-Time Adjustments
 
-*   **Connections Limit**: Scaled between **15 and 60** peers. The AI prioritizes stability when CPU is high or streaming is smooth, and explores higher limits when peers are scarce or speed is declining.
+*   **Connections Limit**: Scaled between **10 and 60** peers. The AI prioritizes stability when CPU is high or streaming is smooth, and explores higher limits when peers are scarce or speed is declining.
 *   **Peer Timeout**: Higher values reduce peer churn (keep good peers longer); lower values cycle through bad peers faster on struggling torrents.
 *   **Hysteresis & Pulse**: Changes are only applied and logged when parameters actually change. A **Pulse log** is emitted every 5 stable cycles to confirm the optimizer is active.
-*   **Multi-Stream Safety**: If more than one torrent is active simultaneously, the AI is bypassed and all torrents are reset to config default values.
+*   **Multi-Stream Safety**: See Operational Logic above.
 
 ## Installation & Setup
 
@@ -121,7 +148,7 @@ Key design decisions:
 
 ## Fail-Safe Design
 
-If the AI Server is unreachable or returns malformed data, GoStream automatically maintains the last known good settings. Grammar-constrained generation (GBNF) ensures the model can only produce syntactically valid JSON. The `Sanitize()` method clamps values to safe ranges `[15–60]` before applying any change.
+If the AI Server is unreachable or returns malformed data, GoStream automatically maintains the last known good settings. Grammar-constrained generation (GBNF) ensures the model can only produce syntactically valid JSON. The `Sanitize()` method clamps values to safe ranges `[10–60]` before applying any change.
 
 ## Key Files
 *   Logic: `GoStream/ai/ai_tuner.go`
@@ -143,7 +170,7 @@ Below are examples of how the AI Pilot behaves during a typical streaming sessio
 2026/03/09 22:22:25 [AI-Pilot] Context Change Detected: Resetting history for new torrent.
 ```
 
-### 3. Dynamic Optimization (Qwen3-0.6B, March 2026)
+### 3. Dynamic Optimization — Normal conditions (Qwen3-0.6B, March 2026)
 ```text
 // Speed declining, CPU high → reduce connections (cold request, 12.7s)
 2026/03/09 22:27:55 [AI-Pilot] Optimizer applying change: Conns(25->15) Timeout(15s->15s) [Metrics: [CPU:54% (Peak:85%), Buf:98%, Peers:22, Speed:9.6MB/s (DOWN (-2.2MB/s))]]
@@ -155,7 +182,18 @@ Below are examples of how the AI Pilot behaves during a typical streaming sessio
 2026/03/09 22:37:52 [AI-Pilot] Optimizer applying change: Conns(15->20) Timeout(18s->60s) [Metrics: [CPU:23% (Peak:62%), Buf:93%, Peers:2, Speed:0.0MB/s (DOWN (-9.9MB/s))]]
 ```
 
-### 4. Dynamic Optimization (Llama-3.2-1B, earlier session)
+### 4. Dynamic Optimization — Under load (Plex scan + 4K stream, Pi CPU >90%)
+```text
+// Speed crashed from 27MB/s to 3.6MB/s → reduce conns to match active peers, aggressive churn (33.7s latency — Pi under load)
+2026/03/10 13:30:43 [AI-Pilot] RAW: "{\"connections_limit\":13,\"peer_timeout_seconds\":10}" | Latency: 33.720322922s
+2026/03/10 13:30:43 [AI-Pilot] Optimizer applying change: Conns(25->13) Timeout(15s->10s) [Metrics: [CPU:70% (Peak:91%), Buf:99%, Peers:13, Speed:3.6MB/s (DOWN (-24.0MB/s))]]
+
+// Speed recovered to 15.2MB/s → stabilize working peers (timeout 10s→60s), hold conns (44.6s latency)
+2026/03/10 13:36:19 [AI-Pilot] RAW: "{\"connections_limit\":13,\"peer_timeout_seconds\":60}" | Latency: 44.647535885s
+2026/03/10 13:36:19 [AI-Pilot] Optimizer applying change: Conns(13->13) Timeout(10s->60s) [Metrics: [CPU:67% (Peak:89%), Buf:98%, Peers:13, Speed:15.2MB/s (UP (+8.0MB/s))]]
+```
+
+### 5. Dynamic Optimization — Llama-3.2-1B (earlier session)
 ```text
 // Stabilize peer pool without adding connections (buffer full, speed rising)
 2026/03/09 21:51:05 [AI-Pilot] Optimizer applying change: Conns(25->25) Timeout(15s->48s) [Metrics: [CPU:51% (Peak:78%), Buf:100%, Peers:23, Speed:25.5MB/s (UP (+24.3MB/s))]]
@@ -167,12 +205,12 @@ Below are examples of how the AI Pilot behaves during a typical streaming sessio
 2026/03/09 22:01:14 [AI-Pilot] Optimizer applying change: Conns(50->15) Timeout(60s->15s) [Metrics: [CPU:16% (Peak:55%), Buf:98%, Peers:18, Speed:0.0MB/s (DOWN (-13.4MB/s))]]
 ```
 
-### 5. Auto-Disable (LLM not running)
+### 6. Auto-Disable (LLM not running)
 ```text
 2026/03/09 20:37:03 [AI-Pilot] LLM not reachable (http://127.0.0.1:8085) — auto-disabled. Restart gostream to re-enable.
 ```
 
-### 6. Stability Confirmation (Pulse)
+### 7. Stability Confirmation (Pulse)
 ```text
 2026/03/04 11:18:28 [AI-Pilot] Pulse: Optimizer active, values stable at Conns(25) Timeout(48s). Metrics: [CPU:49%, Buf:102%, Peers:15, Speed:16.5MB/s]
 ```
