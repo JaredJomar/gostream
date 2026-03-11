@@ -45,7 +45,6 @@ type Config struct {
 	ReadBufferSizeKB       int    `json:"read_buffer_size_kb"`
 	FuseBlockSize          int    `json:"fuse_block_size_bytes"`
 	StreamingThresholdKB   int64  `json:"streaming_threshold_kb"`
-	MaxConcurrentStreaming int    `json:"max_concurrent_streaming"` // V187: Aligned to 25 (Native Bridge offload)
 	LogLevel               string `json:"log_level"`
 
 	// --- FUSE Timing ---
@@ -146,7 +145,6 @@ func LoadConfig() Config {
 		ReadBufferSizeKB:       64,
 		FuseBlockSize:          1048576,
 		StreamingThresholdKB:   128,
-		MaxConcurrentStreaming: 25,
 		LogLevel:               "INFO",
 
 		AttrTimeoutSeconds:     1.0,

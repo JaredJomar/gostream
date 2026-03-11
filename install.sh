@@ -457,7 +457,6 @@ generate_config_json() {
   "read_buffer_size_kb": 1024,
   "fuse_block_size_bytes": 1048576,
   "streaming_threshold_kb": 128,
-  "max_concurrent_streaming": 25,
   "log_level": "INFO",
   "attr_timeout_seconds": 1,
   "entry_timeout_seconds": 1,

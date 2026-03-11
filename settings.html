@@ -565,11 +565,6 @@
                                 <div class="hint">Global concurrent data request slots</div>
                             </div>
                             <div class="form-group">
-                                <label>Max Streaming Slots</label>
-                                <input type="number" name="max_concurrent_streaming">
-                                <div class="hint">Reserved slots for active playback</div>
-                            </div>
-                            <div class="form-group">
                                 <label>Streaming Threshold (KB)</label>
                                 <input type="number" name="streaming_threshold_kb">
                                 <div class="hint">Min request size to activate stream mode</div>
@@ -1200,7 +1195,7 @@
         let originalEngine = {};
         const ENGINE_ROOT_KEYS = [
             'physical_source_path', 'fuse_mount_path',
-            'master_concurrency_limit', 'max_concurrent_streaming', 'read_ahead_budget_mb',
+            'master_concurrency_limit', 'read_ahead_budget_mb',
             'streaming_threshold_kb', 'read_buffer_size_kb', 'write_buffer_size_kb',
             'fuse_block_size_bytes', 'attr_timeout_seconds', 'entry_timeout_seconds',
             'negative_timeout_seconds', 'metadata_cache_size_mb', 'max_cache_entries',

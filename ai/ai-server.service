@@ -7,7 +7,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/GoStream/ai
 # Fixed ExecStart on a single line to ensure correct parameter passing
-ExecStart=/home/pi/GoStream/ai/llama.cpp/build/bin/llama-server -m /home/pi/GoStream/ai/models/Llama-3.2-1B-Instruct-Q3_K_M.gguf --port 8085 -t 2 -c 512 --host 0.0.0.0
+ExecStart=/home/pi/GoStream/ai/llama.cpp/build/bin/llama-server -m /home/pi/GoStream/ai/models/Qwen_Qwen3-0.6B-Q4_K_M.gguf --port 8085 -t 2 -c 512 --host 0.0.0.0
     
 Restart=always
 RestartSec=10

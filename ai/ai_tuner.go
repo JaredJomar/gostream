@@ -41,7 +41,7 @@ const crisisCycle = 12 // 60s
 
 // Keep-Alive client for llama.cpp local
 var aiClient = &http.Client{
-	Timeout: 120 * time.Second,
+	Timeout: 180 * time.Second,
 	Transport: &http.Transport{
 		MaxIdleConns:      10,
 		IdleConnTimeout:   90 * time.Second,
@@ -254,6 +254,12 @@ func runTuningCycle(aiURL string) {
 		}
 	}
 
+	// IDLE GUARD: buffer full + no download → nothing to optimize
+	if buffer > 95 && currSpeedMBs == 0 {
+		log.Printf("[AI-Pilot] Idle guard: buffer=%d%% speed=0 — skipping AI call.", buffer)
+		return
+	}
+
 	currentSnap := sanitizeStr(fmt.Sprintf("[CPU:%d%% (Peak:%d%%), Buf:%d%%, Peers:%d, Speed:%.1fMB/s (%s)]",
 		int(avgCPU), int(peakCPUCycle), buffer, activeStats.ActivePeers, currSpeedMBs, speedTrendStr))
 
@@ -262,6 +268,7 @@ func runTuningCycle(aiURL string) {
 		metricsHistory = metricsHistory[1:]
 	}
 	historyStr := strings.Join(metricsHistory, " -> ")
+
 
 	fSize := activeT.Size
 	if fSize == 0 {
@@ -282,7 +289,7 @@ func runTuningCycle(aiURL string) {
 		historyPrefix = "history=" + historyStr + " "
 	}
 	prompt := fmt.Sprintf(
-		"<|im_start|>system\nTune BitTorrent parms for performace 4K Movie streaming. connections_limit MUST be between 10-60. peer_timeout_seconds MUST be between 10-60. Output JSON: {\"connections_limit\":N,\"peer_timeout_seconds\":M}<|im_end|>\n<|im_start|>user\nactual Peers in Swarm %d - %sspeed=%.0fMB/s cpu=%d%% buf=%d%% peers=%d trend=%s<|im_end|>\n<|im_start|>assistant\n",
+		"<|im_start|>system\nTune BitTorrent parms for performance 4K Movie streaming. connections_limit MUST be between 10-60. peer_timeout_seconds MUST be between 10-60. Output JSON: {\"connections_limit\":N,\"peer_timeout_seconds\":M}<|im_end|>\n<|im_start|>user\nactual Peers in Swarm %d - %sspeed=%.0fMB/s cpu=%d%% buf=%d%% peers=%d trend=%s<|im_end|>\n<|im_start|>assistant\n",
 		activeStats.TotalPeers, historyPrefix, currSpeedMBs, int(currentCPU), buffer, activeStats.ActivePeers, speedTrendStr,
 	)
 	_ = contextStr
