@@ -26,7 +26,6 @@ var lastTimeout = 0
 var defaultConns = 0
 var defaultTimeout = 0
 var metricsHistory []string
-var lastKnownTotalSpeed float64
 var CurrentLimit int32
 
 // Rolling buffers (300s window, 60 samples every 5s)
@@ -144,7 +143,6 @@ func runTuningCycle(aiURL string) {
 	count := len(activeTorrents)
 
 	if count == 0 {
-		lastKnownTotalSpeed = 0
 		torrentSpeedAvg = nil
 		cpuUsageAvg = nil
 		cycleCounter = 0
@@ -193,16 +191,13 @@ func runTuningCycle(aiURL string) {
 
 	var activeT *torr.Torrent
 	var activeStats *state.TorrentStatus
-	var totalSpeedRaw float64
 
 	for _, t := range activeTorrents {
 		if t.Torrent == nil {
 			continue
 		}
-		st := t.StatHighFreq()
-		totalSpeedRaw += st.DownloadSpeed
+		activeStats = t.StatHighFreq()
 		activeT = t
-		activeStats = st
 	}
 
 	if activeT == nil || activeStats == nil {
