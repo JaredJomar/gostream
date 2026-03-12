@@ -28,5 +28,4 @@ gostream
 
 .gemini/
 gha-creds-*.json
-.github
 .sisyphus
