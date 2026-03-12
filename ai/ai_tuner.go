@@ -51,6 +51,7 @@ var aiClient = &http.Client{
 type AITweak struct {
 	ConnectionsLimit float64 `json:"connections_limit"`
 	PeerTimeout      float64 `json:"peer_timeout_seconds"`
+	DiscoveryBoost   bool    `json:"discovery_boost"`
 }
 
 func resetLlamaCache(aiURL string) {
@@ -134,6 +135,7 @@ func StartAITuner(ctx context.Context, aiURL string) {
 }
 
 var lastActiveHash string
+var lastAnnounceAt time.Time
 
 func runTuningCycle(aiURL string) {
 	if aiDisabled.Load() {
@@ -215,6 +217,7 @@ func runTuningCycle(aiURL string) {
 		lastTimeout = defaultTimeout
 		pulseCounter = 0
 		peakCPUCycle = 0
+		lastAnnounceAt = time.Time{}
 		go resetLlamaCache(aiURL)
 	}
 	lastActiveHash = currentHash
@@ -299,13 +302,18 @@ func runTuningCycle(aiURL string) {
 	peakCPUCycle = 0
 
 	// Qwen3 ChatML template
+	swarmEfficiency := 1.0
+	if activeStats.TotalPeers > 0 {
+		swarmEfficiency = float64(activeStats.ActivePeers) / float64(activeStats.TotalPeers)
+	}
+
 	historyPrefix := ""
 	if len(metricsHistory) > 0 {
 		historyPrefix = "history=" + historyStr + " "
 	}
 	prompt := fmt.Sprintf(
-		"<|im_start|>system\nTune BitTorrent parms for performance 4K Movie streaming. connections_limit MUST be between 10-60. peer_timeout_seconds MUST be between 10-60. Output JSON: {\"connections_limit\":N,\"peer_timeout_seconds\":M}<|im_end|>\n<|im_start|>user\nactual Peers in Swarm %d. File size %.1fGB - %sspeed=%.0fMB/s cpu=%d%% buf=%d%% peers=%d trend=%s<|im_end|>\n<|im_start|>assistant\n",
-		activeStats.TotalPeers, fileSizeGB, historyPrefix, currSpeedMBs, int(currentCPU), buffer, activeStats.ActivePeers, speedTrendStr,
+		"<|im_start|>system\nTune BitTorrent parms for performance 4K Movie streaming. connections_limit MUST be between 10-60. peer_timeout_seconds MUST be between 10-60. discovery_boost: true (if you think we need more peers from trackers), false (otherwise). Output JSON: {\"connections_limit\":N,\"peer_timeout_seconds\":M,\"discovery_boost\":B}<|im_end|>\n<|im_start|>user\nActive peers in swarm:%d Total peers:%d Swarm efficiency:%.0f%% Connected seeds:%d File size:%.1fGB - %sspeed=%.0fMB/s cpu=%d%% buf=%d%% peers=%d trend=%s<|im_end|>\n<|im_start|>assistant\n",
+		activeStats.ActivePeers, activeStats.TotalPeers, swarmEfficiency*100, activeStats.ConnectedSeeders, fileSizeGB, historyPrefix, currSpeedMBs, int(currentCPU), buffer, activeStats.ActivePeers, speedTrendStr,
 	)
 	tweak, err := fetchAIJSON[AITweak](aiURL, prompt)
 	if err != nil {
@@ -335,18 +343,31 @@ func runTuningCycle(aiURL string) {
 					lastConns, lastTimeout, currentSnap)
 				pulseCounter = 0
 			}
-			return
+		} else {
+			pulseCounter = 0
+
+			activeT.Torrent.SetMaxEstablishedConns(newConns)
+			atomic.StoreInt32(&CurrentLimit, int32(newConns))
+			activeT.AddExpiredTime(time.Duration(newTimeout) * time.Second)
+			lastConns = newConns
+			lastTimeout = newTimeout
+
+			log.Printf("[AI-Pilot] Optimizer applying change: Conns(%d->%d) Timeout(%ds->%ds) [Metrics: %s] [Ctx: %s] [File: %.1fGB]",
+				oldConns, lastConns, oldTimeout, lastTimeout, currentSnap, contextStr, fileSizeGB)
 		}
-		pulseCounter = 0
 
-		activeT.Torrent.SetMaxEstablishedConns(newConns)
-		atomic.StoreInt32(&CurrentLimit, int32(newConns))
-		activeT.AddExpiredTime(time.Duration(newTimeout) * time.Second)
-		lastConns = newConns
-		lastTimeout = newTimeout
-
-		log.Printf("[AI-Pilot] Optimizer applying change: Conns(%d->%d) Timeout(%ds->%ds) [Metrics: %s] [Ctx: %s] [File: %.1fGB]",
-			oldConns, lastConns, oldTimeout, lastTimeout, currentSnap, contextStr, fileSizeGB)
+		if tweak.DiscoveryBoost && time.Since(lastAnnounceAt) > 120*time.Second {
+			healthyThresholdMBs := fileSizeGB * 0.15
+			if currSpeedMBs > healthyThresholdMBs || buffer > 80 {
+				log.Printf("[AI-Pilot] DiscoveryBoost: skipped (streaming healthy: speed=%.1fMB/s threshold=%.1fMB/s buf=%d%%)",
+					currSpeedMBs, healthyThresholdMBs, buffer)
+			} else {
+				lastAnnounceAt = time.Now()
+				activeT.Torrent.Announce()
+				log.Printf("[AI-Pilot] DiscoveryBoost: swarm efficiency %.0f%% (active:%d/total:%d/seed:%d) → tracker re-announce triggered",
+					swarmEfficiency*100, activeStats.ActivePeers, activeStats.TotalPeers, activeStats.ConnectedSeeders)
+			}
+		}
 	}
 
 }
@@ -354,12 +375,13 @@ func runTuningCycle(aiURL string) {
 func fetchAIJSON[T any](url string, prompt string) (*T, error) {
 	start := time.Now()
 
-	grammar := `root ::= "{\"connections_limit\":" number ",\"peer_timeout_seconds\":" number "}"
-number ::= [1-9] [0-9]?`
+	grammar := `root ::= "{\"connections_limit\":" number ",\"peer_timeout_seconds\":" number ",\"discovery_boost\":" bool "}"
+number ::= [1-9] [0-9]?
+bool ::= "true" | "false"`
 
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"prompt":       prompt,
-		"n_predict":    25,
+		"n_predict":    35,
 		"temperature":  0.1,
 		"stop":         []string{"<|im_end|>"},
 		"cache_prompt": true,

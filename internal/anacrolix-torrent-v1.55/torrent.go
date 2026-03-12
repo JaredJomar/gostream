@@ -3054,12 +3054,19 @@ func (t *Torrent) getDialTimeoutUnlocked() time.Duration {
 
 // Announce forces a tracker announce for all trackers.
 // Patch by Tsynik for TorrServer SprintMetadata.
+// Fixed: lock only to copy scrapers, then release before calling announce()
+// to avoid deadlock (announce → rLock while write lock held on same goroutine).
 func (t *Torrent) Announce() {
 	t.cl.lock()
-	defer t.cl.unlock()
+	scrapers := make([]*trackerScraper, 0, len(t.trackerAnnouncers))
 	for _, ta := range t.trackerAnnouncers {
 		if ts, ok := ta.(*trackerScraper); ok {
-			ts.announce(context.Background(), 0)
+			scrapers = append(scrapers, ts)
 		}
+	}
+	t.cl.unlock()
+
+	for _, ts := range scrapers {
+		go ts.announce(context.Background(), 0)
 	}
 }
