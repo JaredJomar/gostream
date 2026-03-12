@@ -1,0 +1,14 @@
+#!/usr/bin/with-contenv bash
+set -euo pipefail
+
+enabled="${GOSTREAM_HEALTH_MONITOR_ENABLED:-1}"
+port="${HEALTH_MONITOR_PORT:-8095}"
+
+if [ "$enabled" != "1" ]; then
+  echo "[health-monitor] Disabled (GOSTREAM_HEALTH_MONITOR_ENABLED=$enabled)" >&2
+  # Keep service 'up' but idle.
+  exec sleep infinity
+fi
+
+echo "[health-monitor] Starting on port $port" >&2
+exec python3 /app/scripts/health-monitor.py

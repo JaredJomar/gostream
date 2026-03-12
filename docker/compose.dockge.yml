@@ -1,0 +1,42 @@
+name: plex-gostream
+
+services:
+  plex_gostream:
+    container_name: plex-gostream
+    build:
+      context: ${GOSTREAM_CONTEXT:-B:/Documents/Github/Forks/gostream}
+      dockerfile: docker/Dockerfile.plex
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - PLEX_CLAIM=${PLEX_CLAIM:-}
+      - ADVERTISE_IP=${ADVERTISE_IP:-http://192.168.0.144:32401/}
+      - MKV_PROXY_CONFIG_PATH=/config/config.json
+      - GOSTREAM_ROOT_PATH=/config/gostream
+      - GOSTREAM_SOURCE_PATH=/mnt/gostream-mkv-real
+      - GOSTREAM_MOUNT_PATH=/mnt/gostream-mkv-virtual
+      - GOSTREAM_STATE_DIR=/config/gostream/STATE
+      - GOSTREAM_LOG_DIR=/config/gostream/logs
+      - HEALTH_MONITOR_PORT=8095
+      - GOSTREAM_HEALTH_MONITOR_ENABLED=1
+    ports:
+      - 32401:32400/tcp
+      - 8090:8090
+      - 8095:8095
+      - 8096:8096
+    volumes:
+      - plex_config:/config
+      - plex_transcode:/transcode
+      - ${GOSTREAM_REAL_PATH:-B:/Documents/Docker Stuff/gostream-mkv-real}:/mnt/gostream-mkv-real
+      - ${GOSTREAM_CONFIG_FILE:-B:/Documents/Docker Stuff/gostream/config.json}:/config/config.json
+      - ${POPCORN_PATH:-P:/Popcorn Time}:/data/popcorn-time
+
+volumes:
+  plex_config:
+  plex_transcode:

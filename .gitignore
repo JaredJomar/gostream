@@ -28,3 +28,4 @@ gostream
 
 .gemini/
 gha-creds-*.json
+.sisyphus

@@ -1,0 +1,14 @@
+#!/usr/bin/with-contenv bash
+set -euo pipefail
+
+# Ensure GoStream has a config file inside /config volume.
+config_path="${MKV_PROXY_CONFIG_PATH:-/config/config.json}"
+example_src="/app/config.json.example"
+
+mkdir -p "$(dirname "$config_path")"
+
+if [ ! -f "$config_path" ]; then
+  echo "[gostream] Missing config at $config_path; copying from $example_src" >&2
+  cp "$example_src" "$config_path"
+  chmod 0644 "$config_path"
+fi
