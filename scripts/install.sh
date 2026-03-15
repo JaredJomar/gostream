@@ -433,10 +433,10 @@ generate_config_json() {
     # Ensure INSTALL_DIR exists before writing anything
     mkdir -p "${INSTALL_DIR}"
 
-    # Look for config.json.example: first in the repo (SCRIPT_DIR), then in INSTALL_DIR
+    # Look for config.json.example: first in the repo (config/ dir), then in INSTALL_DIR
     local example_path
-    if [ -f "${SCRIPT_DIR}/config.json.example" ]; then
-        example_path="${SCRIPT_DIR}/config.json.example"
+    if [ -f "${SCRIPT_DIR}/../config/config.json.example" ]; then
+        example_path="${SCRIPT_DIR}/../config/config.json.example"
     else
         example_path="${INSTALL_DIR}/config.json.example"
     fi
@@ -570,17 +570,17 @@ deploy_files() {
 
     mkdir -p "${INSTALL_DIR}/scripts"
 
-    # Copy scripts
-    if [ -d "${SCRIPT_DIR}/scripts" ]; then
-        cp -r "${SCRIPT_DIR}/scripts/." "${INSTALL_DIR}/scripts/"
+    # Copy scripts (install.sh lives inside scripts/ now, so SCRIPT_DIR IS the scripts dir)
+    if [ -d "${SCRIPT_DIR}" ]; then
+        cp -r "${SCRIPT_DIR}/." "${INSTALL_DIR}/scripts/"
         print_ok "Scripts deployed to ${INSTALL_DIR}/scripts/"
     else
-        print_warn "scripts/ directory not found in ${SCRIPT_DIR} — skipping."
+        print_warn "scripts/ directory not found — skipping."
     fi
 
     # Copy config.json.example (useful reference for the user)
-    if [ -f "${SCRIPT_DIR}/config.json.example" ]; then
-        cp "${SCRIPT_DIR}/config.json.example" "${INSTALL_DIR}/config.json.example"
+    if [ -f "${SCRIPT_DIR}/../config/config.json.example" ]; then
+        cp "${SCRIPT_DIR}/../config/config.json.example" "${INSTALL_DIR}/config.json.example"
         print_ok "config.json.example deployed to ${INSTALL_DIR}/"
     fi
 
@@ -875,7 +875,9 @@ compile_binary() {
     ensure_go
     ensure_swap
 
-    local src_dir="${SCRIPT_DIR}"
+    local repo_root
+    repo_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    local src_dir="${repo_root}/cmd/gostream"
     local out_bin="${INSTALL_DIR}/gostream"
 
     # Verify we have Go source files in the expected location
@@ -884,14 +886,14 @@ compile_binary() {
         exit 1
     fi
 
-    cd "${src_dir}"
+    cd "${repo_root}"
 
     print_info "Running go mod tidy..."
     GOTOOLCHAIN=local "$GO_BIN" mod tidy
 
     # Use -pgo=off if no default.pgo present (fresh install)
     local pgo_flag="-pgo=off"
-    if [ -f "${src_dir}/default.pgo" ]; then
+    if [ -f "${repo_root}/default.pgo" ]; then
         pgo_flag="-pgo=auto"
         print_info "PGO profile found — building with -pgo=auto"
     else
@@ -904,7 +906,7 @@ compile_binary() {
     mkdir -p "${go_tmp}"
     print_info "Building binary (GOARCH=${GO_ARCH}, -p 2)..."
     GOTOOLCHAIN=local GOARCH="${GO_ARCH}" CGO_ENABLED=1 GOTMPDIR="${go_tmp}" \
-        "$GO_BIN" build ${pgo_flag} -p 2 -o "${out_bin}" .
+        "$GO_BIN" build ${pgo_flag} -p 2 -o "${out_bin}" ./cmd/gostream
     rm -rf "${go_tmp}"
 
     chmod +x "${out_bin}"

@@ -3,8 +3,8 @@ name: jellyfin-gostream
 services:
   jellyfin_gostream:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.jellyfin
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.jellyfin
     container_name: jellyfin-gostream
     restart: unless-stopped
     privileged: true

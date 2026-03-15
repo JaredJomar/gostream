@@ -3,8 +3,8 @@ name: plex-gostream
 services:
   plex_gostream:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.plex
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.plex
     container_name: plex-gostream
     privileged: true
     devices:

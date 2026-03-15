@@ -7,21 +7,54 @@ Converts Prowlarr/Newznab results to Stremio/Torrentio format.
 import json
 import logging
 import os
+import time
 import requests
 from typing import List, Dict, Any, Optional
 
+
+def _resolve_config_path(explicit_path: Optional[str] = None) -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+
+    if explicit_path:
+        candidates.append(explicit_path)
+
+    env_path = os.environ.get('MKV_PROXY_CONFIG_PATH')
+    if env_path:
+        candidates.append(env_path)
+
+    # Common container/install locations.
+    candidates.extend([
+        '/config/config.json',
+        '/app/config.json',
+        os.path.join(script_dir, '..', 'config.json'),
+    ])
+
+    seen = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if os.path.isfile(path):
+            return path
+
+    # Keep previous fallback behavior, but only after trying all known locations.
+    return os.path.join(script_dir, '..', 'config.json')
+
 class ProwlarrClient:
     def __init__(self, config_path=None):
-        # Load config from GoStream config.json (co-located with binary, one level up from scripts/)
-        if config_path is None:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(script_dir, '..', 'config.json')
+        config_path = _resolve_config_path(config_path)
 
         prowlarr_cfg = {}
         try:
             with open(config_path, 'r') as f:
                 cfg = json.load(f)
                 prowlarr_cfg = cfg.get('prowlarr', {})
+        except FileNotFoundError:
+            logging.info(
+                "Prowlarr config not found at %s; adapter will remain disabled unless config exists.",
+                config_path,
+            )
         except Exception as e:
             logging.warning(f"Could not load Prowlarr config from {config_path}: {e}")
 
@@ -29,6 +62,15 @@ class ProwlarrClient:
         self.API_KEY = prowlarr_cfg.get('api_key', '')
         self.BASE_URL = prowlarr_cfg.get('url', '')
         self.SEARCH_ENDPOINT = f"{self.BASE_URL}/api/v1/search"
+        # Prowlarr searches can be slow when querying many indexers; keep this configurable.
+        self.REQUEST_TIMEOUT = int(
+            os.environ.get(
+                'PROWLARR_HTTP_TIMEOUT_SECONDS',
+                prowlarr_cfg.get('timeout_seconds', 90),
+            )
+        )
+        self.MAX_RETRIES = int(os.environ.get('PROWLARR_MAX_RETRIES', '2'))
+        self.RETRY_DELAY_SECONDS = float(os.environ.get('PROWLARR_RETRY_DELAY_SECONDS', '1.5'))
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -52,15 +94,31 @@ class ProwlarrClient:
             "type": prowlarr_type,
             "indexerIds": "-2"  # All indexers
         }
-        try:
-            # Use session for connection reuse and 30s timeout
-            response = self.session.get(self.SEARCH_ENDPOINT, params=params, timeout=30)
-            if response.status_code == 200:
-                return response.json()
-            else:
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = self.session.get(
+                    self.SEARCH_ENDPOINT,
+                    params=params,
+                    timeout=self.REQUEST_TIMEOUT,
+                )
+                if response.status_code == 200:
+                    return response.json()
+                if response.status_code in (401, 403):
+                    logging.error(f"Prowlarr auth failed with status {response.status_code}; check api_key")
+                    return []
                 logging.warning(f"Prowlarr API returned status {response.status_code}")
-        except Exception as e:
-            logging.error(f"Error fetching from Prowlarr: {e}")
+            except Exception as e:
+                if attempt < self.MAX_RETRIES:
+                    logging.warning(
+                        "Prowlarr request failed (attempt %d/%d): %s; retrying in %.1fs",
+                        attempt,
+                        self.MAX_RETRIES,
+                        e,
+                        self.RETRY_DELAY_SECONDS,
+                    )
+                    time.sleep(self.RETRY_DELAY_SECONDS)
+                    continue
+                logging.error(f"Error fetching from Prowlarr after {self.MAX_RETRIES} attempts: {e}")
         return []
 
     def fetch_torrents(self, imdb_id: str, content_type: str = "movie") -> List[Dict[str, Any]]:

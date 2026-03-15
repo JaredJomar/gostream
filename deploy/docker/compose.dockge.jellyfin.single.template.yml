@@ -5,7 +5,7 @@ services:
     container_name: jellyfin-gostream
     build:
       context: ${GOSTREAM_CONTEXT}
-      dockerfile: docker/Dockerfile.jellyfin
+      dockerfile: deploy/docker/Dockerfile.jellyfin
     restart: unless-stopped
     privileged: true
     devices:

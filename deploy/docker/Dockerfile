@@ -11,7 +11,7 @@ COPY . .
 ARG TARGETARCH
 # CGO_ENABLED=1 is required for FUSE integration. 
 # -pgo=auto ensures we use profile-guided optimization if default.pgo is present.
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=$TARGETARCH go build -pgo=auto -o /out/gostream .
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=$TARGETARCH go build -pgo=auto -o /out/gostream ./cmd/gostream
 
 FROM debian:bookworm-slim
 
@@ -27,14 +27,14 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt /tmp/requirements.txt
+COPY scripts/requirements.txt /tmp/requirements.txt
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt
 
 COPY --from=build /out/gostream /usr/local/bin/gostream
-COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY deploy/docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY scripts /app/scripts
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
