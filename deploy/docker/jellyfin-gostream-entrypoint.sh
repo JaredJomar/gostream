@@ -15,7 +15,32 @@ JELLYFIN_CONFIG_DIR="${JELLYFIN_CONFIG_DIR:-/config/config}"
 JELLYFIN_CACHE_DIR="${JELLYFIN_CACHE_DIR:-/cache}"
 JELLYFIN_LOG_DIR="${JELLYFIN_LOG_DIR:-/config/log}"
 
-mkdir -p "$SOURCE_PATH" "$MOUNT_PATH" "$ROOT_PATH" "$STATE_DIR" "$LOG_DIR" "$JELLYFIN_DATA_DIR" "$JELLYFIN_CONFIG_DIR" "$JELLYFIN_CACHE_DIR" "$JELLYFIN_LOG_DIR"
+mount_is_readable() {
+  ls -ld "$1" >/dev/null 2>&1
+}
+
+cleanup_stale_mount() {
+  target="$1"
+  if mountpoint -q "$target" 2>/dev/null; then
+    if grep -q " $target fuse" /proc/mounts 2>/dev/null; then
+      if mount_is_readable "$target"; then
+        echo "Stale FUSE mount detected at $target, cleaning up..." >&2
+      else
+        echo "Unreadable stale FUSE mount detected at $target, cleaning up..." >&2
+      fi
+      fusermount3 -uz "$target" 2>/dev/null || true
+      umount -l "$target" 2>/dev/null || true
+    fi
+  fi
+}
+
+mkdir -p "$SOURCE_PATH" "$ROOT_PATH" "$STATE_DIR" "$LOG_DIR" "$JELLYFIN_DATA_DIR" "$JELLYFIN_CONFIG_DIR" "$JELLYFIN_CACHE_DIR" "$JELLYFIN_LOG_DIR"
+cleanup_stale_mount "$MOUNT_PATH"
+if ! mkdir -p "$MOUNT_PATH"; then
+  echo "Cannot create/read mount path $MOUNT_PATH (possible stale transport endpoint)." >&2
+  echo "Fix on Docker host: sudo umount -l $MOUNT_PATH ; then restart container." >&2
+  exit 1
+fi
 
 if [ ! -f "$CONFIG_PATH" ]; then
   if [ -f /app/config.json.example ]; then
@@ -27,11 +52,7 @@ if [ ! -f "$CONFIG_PATH" ]; then
   fi
 fi
 
-if mountpoint -q "$MOUNT_PATH" 2>/dev/null; then
-  if grep -q " $MOUNT_PATH fuse" /proc/mounts 2>/dev/null; then
-    fusermount3 -uz "$MOUNT_PATH" 2>/dev/null || true
-  fi
-fi
+cleanup_stale_mount "$MOUNT_PATH"
 
 health_pid=""
 gostream_pid=""

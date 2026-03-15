@@ -14,6 +14,8 @@ import json
 import logging
 import os
 import re
+import shlex
+import shutil
 import socket
 import subprocess
 import threading
@@ -116,6 +118,49 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+_restart_unavailable_logged = False
+
+
+def _resolve_gostream_restart_cmd() -> Optional[List[str]]:
+    """Pick the best restart command for the current runtime environment."""
+    override = os.environ.get("GOSTREAM_RESTART_CMD", "").strip()
+    if override:
+        return shlex.split(override)
+
+    # In Plex/Jellyfin Docker images we supervise GoStream via s6.
+    if shutil.which("s6-svc") and os.path.isdir("/run/service/gostream"):
+        return ["s6-svc", "-r", "/run/service/gostream"]
+
+    # On bare-metal installs, restart via systemd.
+    if shutil.which("systemctl"):
+        if os.geteuid() == 0 or not shutil.which("sudo"):
+            return ["systemctl", "restart", "gostream"]
+        return ["sudo", "systemctl", "restart", "gostream"]
+
+    return None
+
+
+def _restart_gostream(timeout: int = 10) -> bool:
+    """Restart GoStream service. Returns True if restart command succeeded."""
+    global _restart_unavailable_logged
+
+    cmd = _resolve_gostream_restart_cmd()
+    if not cmd:
+        if not _restart_unavailable_logged:
+            logger.error(
+                "Auto-restart unavailable: no s6-svc/systemctl command found. "
+                "Set GOSTREAM_RESTART_CMD or disable auto-restart in this environment."
+            )
+            _restart_unavailable_logged = True
+        return False
+
+    try:
+        subprocess.run(cmd, timeout=timeout, check=True)
+        return True
+    except Exception as exc:
+        logger.error(f"Auto-restart failed using {' '.join(cmd)}: {exc}")
+        return False
 
 # =============================================================================
 # Global State
@@ -702,9 +747,9 @@ def check_gostorm() -> None:
             if gostorm_fail_count >= GOSTORM_MAX_FAILURES:
                 logger.error(f"GoStorm persistent failure detected ({GOSTORM_MAX_FAILURES} attempts @ {GOSTORM_HEALTH_INTERVAL}s). Auto-restarting...")
                 try:
-                    subprocess.run(["sudo", "systemctl", "restart", "gostream"], timeout=10)
-                    gostorm_fail_count = 0
-                    last_restart["gostorm"] = time.time()
+                    if _restart_gostream(timeout=10):
+                        gostorm_fail_count = 0
+                        last_restart["gostorm"] = time.time()
                 except Exception as re:
                     logger.error(f"Auto-restart failed: {re}")
 

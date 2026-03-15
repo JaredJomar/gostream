@@ -11,8 +11,6 @@ HEALTH_MONITOR_ENABLED="${GOSTREAM_HEALTH_MONITOR_ENABLED:-1}"
 HEALTH_MONITOR_PORT="${HEALTH_MONITOR_PORT:-8095}"
 HOST_MOUNT_HINT="${GOSTREAM_HOST_MOUNT_HINT:-}"
 
-mkdir -p "$SOURCE_PATH" "$MOUNT_PATH" "$ROOT_PATH" "$STATE_DIR" "$LOG_DIR"
-
 mount_is_readable() {
   ls -ld "$1" >/dev/null 2>&1
 }
@@ -28,19 +26,37 @@ emit_lazy_unmount_hint() {
   echo "  sudo umount -l $hint_path" >&2
 }
 
+cleanup_stale_mount() {
+  target="$1"
+
+  if mountpoint -q "$target" 2>/dev/null; then
+    if grep -q " $target fuse" /proc/mounts 2>/dev/null; then
+      if mount_is_readable "$target"; then
+        echo "Stale FUSE mount detected at $target, cleaning up..." >&2
+      else
+        echo "Unreadable stale FUSE mount detected at $target, cleaning up..." >&2
+        emit_lazy_unmount_hint
+      fi
+      fusermount3 -uz "$target" 2>/dev/null || true
+      umount -l "$target" 2>/dev/null || true
+    fi
+  fi
+}
+
+mkdir -p "$SOURCE_PATH" "$ROOT_PATH" "$STATE_DIR" "$LOG_DIR"
+cleanup_stale_mount "$MOUNT_PATH"
+if ! mkdir -p "$MOUNT_PATH"; then
+  emit_lazy_unmount_hint
+  exit 1
+fi
+
 # Clean up only stale FUSE layers at startup.
 # Docker's bind mount for $MOUNT_PATH is always a mountpoint, so a bare
 # mountpoint check is not enough. We must leave the bind mount intact and only
 # remove an inherited fuse.* layer sitting on top of it.
 if mountpoint -q "$MOUNT_PATH" 2>/dev/null; then
   if grep -q " $MOUNT_PATH fuse" /proc/mounts 2>/dev/null; then
-    if mount_is_readable "$MOUNT_PATH"; then
-      echo "Stale FUSE mount detected at $MOUNT_PATH, cleaning up..." >&2
-    else
-      echo "Unreadable stale FUSE mount detected at $MOUNT_PATH, cleaning up..." >&2
-      emit_lazy_unmount_hint
-    fi
-    fusermount3 -uz "$MOUNT_PATH" 2>/dev/null || true
+    cleanup_stale_mount "$MOUNT_PATH"
     if ! mount_is_readable "$MOUNT_PATH"; then
       emit_lazy_unmount_hint
       exit 1
